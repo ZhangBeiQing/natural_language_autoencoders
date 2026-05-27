@@ -1,0 +1,24 @@
+diff --git a/python/sglang/srt/models/gemma3_mm.py b/python/sglang/srt/models/gemma3_mm.py
+--- a/python/sglang/srt/models/gemma3_mm.py
++++ b/python/sglang/srt/models/gemma3_mm.py
+@@ - forward: after positions += 1
+         # Important: position_ids in Gemma3 are 1-indexed
+         # This really does cost me sometime
+         positions += 1
++        # === NLA: input_embeds bypass — text-only injection path ===
++        # gemma3_causal.Gemma3ForCausalLM.forward handles input_embeds natively
++        # (bypasses embed_tokens). gemma3_mm routes through general_mm_embed_routine
++        # which only reads input_ids — injected embeds are silently dropped and the
++        # model sees random IDs (deletion of input_ids in nla_generate means None →
++        # garbage tokens → "\n"\n"\n"... repetition). When input_embeds is explicitly
++        # provided (NLA injection), go straight to the language_model — no vision to
++        # process, no mm routine needed. The language_model IS Gemma3ForCausalLM
++        # (gemma3_causal.py line 646-649 passes input_embeds through correctly).
++        #
++        # Without this: _SGLangKeyRemap lets us use gemma3_mm (avoiding the
++        # flashinfer head_dim=256 JIT issue with gemma3_causal), but gemma3_mm
++        # doesn't wire input_embeds — so the whole NLA injection is a no-op.
++        if input_embeds is not None:
++            return self.language_model(input_ids, positions, forward_batch, input_embeds, **kwargs)
+
+         # Replace image id with PAD if the image token if OOV, to avoid index-errors

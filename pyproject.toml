@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nla"
+version = "0.1.0"
+description = "Natural Language Autoencoders: train models to read and write residual-stream activations as text"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+dependencies = [
+    "torch",
+    "transformers",
+    "safetensors",
+    "httpx",
+    "orjson",
+    "pyyaml",
+    "numpy",
+    "pyarrow",
+    "datasets",
+    "anthropic",
+    "openai",
+    "socksio",
+]
+# NOT pip-installable here — install separately per docs/setup.md:
+#   miles    : git clone radixark/miles, build_conda.sh, then git apply nla/miles_patches/*.patch
+#   sglang   : pip install "sglang[all]>=0.5.6", then bash patches/apply_sglang_patches.sh /path/to/sglang
+#   megatron : optional, only for the Megatron backend (70B+)
+
+[project.urls]
+Homepage = "https://github.com/kitft/natural_language_autoencoders"
+
+[tool.setuptools.packages.find]
+include = ["nla*"]
+
+[tool.setuptools.package-data]
+nla = ["miles_patches/*", "datagen/*.yaml"]
+
+[tool.ruff]
+line-length = 119

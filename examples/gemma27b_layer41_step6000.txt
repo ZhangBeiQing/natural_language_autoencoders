@@ -1,0 +1,1349 @@
+════════════════════════════════════════════════════════════════════════════════
+NLA (Natural Language Autoencoder) — WORKED EXAMPLE
+════════════════════════════════════════════════════════════════════════════════
+
+An NLA pair = two fine-tuned LMs that together map activation vectors
+to natural language and back:
+
+  AV (activation verbalizer)  : hidden-state vector  →  text
+                                [injected as a 1-token embedding into
+                                 a fixed prompt, then autoregressive]
+
+  AR (activation reconstructor): text  →  hidden-state vector
+                                [truncated K+1-layer LM + Linear(d,d)
+                                 head, extract at final token]
+
+Together they form a round-trip: extract vector → AV verbalizes →
+AR reconstructs → MSE(reconstructed, original) measures how well the
+verbalization captured the vector's content. This MSE was the RL reward
+signal during training — low MSE = the AR can recover the original
+direction from the AV's words alone.
+
+────────────────────────────────────────────────────────────────────────────────
+AV checkpoint:     kitft/nla-gemma3-27b-L41-av
+AR checkpoint:     kitft/nla-gemma3-27b-L41-ar
+Extraction model:  google/gemma-3-27b-it
+Extraction:        layer 41 residual stream (= HF hidden_states[42], output of block 41)
+d_model:           5376
+NLA inference:     temp=0 (greedy — reproducible)
+AR mse_nrm:        MSE of L2-normalized vectors (both scaled to √d=73.32). Equals 2(1-cos) — geometrically
+                   model-agnostic. Range: 0 (perfect) — 2 (orthogonal).
+fve_nrm:           1 - mse_nrm / 0.0579. Denominator is Var(v_nrm) from the TRAINING dataset — the
+                   predict-the-mean baseline MSE. This is the cross-model comparable metric.
+
+   ⚠ LOW-VARIANCE LAYER: this model/layer has Var(v_nrm)=0.0579 — activations are highly
+   concentrated around their mean. mse_nrm/cos compress into a narrow range (everything
+   looks ~0.99 cos). fve_nrm is the informative metric here: it measures improvement
+   over the trivial predict-the-mean baseline, which is already very good at low variance.
+
+────────────────────────────────────────────────────────────────────────────────
+1. CHAT-FORMATTED PROMPT
+────────────────────────────────────────────────────────────────────────────────
+
+User message:  'What is the capital of France and what is it known for?'
+
+After apply_chat_template(add_generation_prompt=True):
+  '<bos><start_of_turn>user\nWhat is the capital of France and what is it known for?<end_of_turn>\n<start_of_turn>model\n'
+
+Tokenized: 22 tokens
+
+────────────────────────────────────────────────────────────────────────────────
+2. BASE MODEL REPLY (temp=0)
+────────────────────────────────────────────────────────────────────────────────
+
+  "The capital of France is **Paris**.\n\nParis is known for *a lot*! Here's a breakdown of what it's famous for:\n\n**Iconic Landmarks:**\n\n* **Eiffel Tower:** Perhaps the most recognizable landmark in the world.\n* **Louvre Museum:** Home to masterpieces like the Mona Lisa and Venus de Milo.\n* **Arc de Triomphe:** A monumental arch honoring those who fought in the Napoleonic Wars.\n* **Notre-Dame Cathedral:** A beautiful Gothic cathedral (currently under reconstruction after a fire).\n* **Champs-Élysées:** A famous avenue lined with shops, cafes, and theaters.\n* **Sacré-Cœur Basilica:** A stunning white basilica"
+
+Reply tokens: 150 — full seq 172 (prompt 22 + reply 150)
+
+────────────────────────────────────────────────────────────────────────────────
+3. PER-TOKEN NLA INFERENCE (layer-41 activation → explanation)
+────────────────────────────────────────────────────────────────────────────────
+
+  All decodes are temp=0 (greedy) — reproducible on same SGLang version
+  + hardware. Variance under sampling is shown in §4.
+
+  ||v|| is the RAW L2-norm. Every vector is rescaled to
+  L2=60000 (injection_scale from nla_meta.yaml)
+  before injection. Raw norm is a diagnostic: outliers are OOD —
+  normalization fixes magnitude but not the direction-regime.
+
+  SYSTEM PROMPT positions (first 4) are under-sampled in
+  training — datagen uses min_position=50 which for default system
+  prompts (~20 tokens) skips them entirely. Incidental mechanism,
+  intentional outcome: system prompts are identical across
+  conversations, heavy sampling would overfit. Summary excludes
+  these; user question + reply are in-distribution.
+
+  MSE / cos columns: AR's reconstruction of the activation from
+  the NLA decode text. MSE<0.5 ≈ good fidelity; MSE~2 ≈ orthogonal
+  (random). cos is the same signal (MSE = 2(1-cos) under L2 norm).
+
+Full decode text follows each header — NOT truncated.
+
+[  0]  PROMPT  token='<bos>'  ||v||=860335.9  mse_nrm=0.005  cos=0.998  fve_nrm=0.919
+    Educational/health article format: a structured listicle about diabetes, establishing a formal informational tone about workplace advice.
+    
+    The date pattern "August 26, 2021" signals a date completion is required, following a standard journalistic convention of date formatting.
+    
+    Final token "e.g." introduces a concrete example of a date ("August 26,"), requiring the year completion "20" to finish the date "20" or "20" to complete the date "20" or "20" to complete the date "20" or "20" to specify the year "20" or "20" or "."
+
+[  1]  PROMPT  token='<start_of_turn>'  ||v||=33343.8  mse_nrm=0.543  cos=0.729  fve_nrm=-8.371
+    Educational/technical article format: a structured tutorial on Java programming, covering a practical tutorial about CSS/HTML integration.
+    
+    The sentence beginning "The following article is a detailed guide about..." establishes a list-based instructional pattern, promising detailed steps for the "How to" topic of the Java-based web design.
+    
+    Final token "e.g." introduces a concrete example of a method name ("..."), requiring a continuation like "the following" or "the article" or "this article" to complete the example reference. or "the best practices" or "the following:" or "to create..." or "the new button" or "a custom button." or "in JavaScript."
+
+[  2]  PROMPT  token='user'  ||v||=61947.8  mse_nrm=0.038  cos=0.981  fve_nrm=0.352
+    AI/chatbot response pattern: a structured conversational recommendation model, establishing a personalized advice or query response about a knowledge-seeking task.
+    
+    The phrase "Hey, I'm a AI assistant. Let's try..." signals a conversational prompt or role-based instruction, likely a user request or prompt for a recipe/code suggestion.
+    
+    Final token "user" begins a role or identity label ("##user"), strongly expecting a model/chatbot response or a prompt like "role" or "the" to introduce a question or query. or " " or "role" or "or" to begin a prompt. or "text" or "question" or "ChatGPT" or "."
+
+[  3]  PROMPT  token='\n'  ||v||=72205.9  mse_nrm=0.030  cos=0.985  fve_nrm=0.481
+    Conversational/technical AI or NLP context, likely a question or request about a topic, possibly a creative writing or educational task.
+    
+    The phrase "Describe a..." signals a request or prompt, implying a specific scenario or problem about a dataset/news article about environmental sustainability or chemical compounds.
+    
+    Final token "!" closes a request or question ("..."), strongly expecting a new prompt or question, likely a structured task or scenario about a speech/presentation. or "Write a..." or "Explain the difference..." or "I have a problem..." or "Describe the..." or "Give a code snippet" or "What is the..." or "The company is..." or "Analyze my recent."
+
+[  4]  PROMPT  token='What'  ||v||=52619.5  mse_nrm=0.013  cos=0.994  fve_nrm=0.778
+    AI/chatbot response pattern: a conversational or instructional query about a topic, likely a structured essay or listicle about programming or data.
+    
+    The opening question "How do you..." signals a request or query, likely a question about a topic or example, possibly a business or educational question about a music/dance.
+    
+    Final token "What" begins a question or prompt ("What"), strongly expecting a question or topic request, likely starting a new question or query about the topic. or "are the differences between..." or "is the best way to..." or "are some examples of..." or "role did the Beatles..." or "resources/advice should I..." or "happened in."
+
+[  5]  PROMPT  token=' is'  ||v||=53726.3  mse_nrm=0.011  cos=0.995  fve_nrm=0.810
+    AI/chatbot response pattern: a conversational or instructional query about a topic, likely a question or topic in a structured dataset.
+    
+    The phrase "What is" signals a question or request for a brief/informational answer, likely a technical or philosophical topic about a concept or product.
+    
+    Final token "What is" opens a question or prompt request ("What is..."), strongly expecting a noun phrase or topic question to follow, likely a specific topic or explanation of a programming/business concept. or "the difference between..." or "the metaverse?" or "a recommendation for..." or "the best way to calculate..." or "the role of entropy in..." or "the definition of a."
+
+[  6]  PROMPT  token=' the'  ||v||=27920.3  mse_nrm=0.014  cos=0.993  fve_nrm=0.758
+    Structured argument/quote pattern: a persuasive, reflective essay building a vivid, experiential case for a sci-fi phenomenon.
+    
+    Repetition pattern: "It's a terrifying, awe-inspiring thing, and..." mirrors the earlier paragraph, continuing the emotional urgency about the mysterious, visual puzzle.
+    
+    Final token "again," closes a repeated phrase ("a dramatic event can happen,") requiring continuation with "the" or "it" to complete the repeated sentence, likely referencing the visual or technological challenge. or "the magic" or "the challenge of..." or "their design" or "a unique..." or "of the explosions..." or "have a profound impact." or "in."
+
+[  7]  PROMPT  token=' capital'  ||v||=53569.4  mse_nrm=0.008  cos=0.996  fve_nrm=0.855
+    Educational/informational article format: a structured essay or listicle about a business or economic topic, likely a question about a country or company.
+    
+    The opening question "What is the capital" signals a formal answer or listicle, establishing a factual, encyclopedic response about a geographic or financial topic.
+    
+    Final token "What is the capital" begins a question format ("Which city is the capital..."), immediately expecting a noun phrase like "capital of France" or "city of..." to define the question about a capital city or investment. or "of Italy?" or "of the United Kingdom?" or "of the United States?" or "city of..." or "of a country."
+
+[  8]  PROMPT  token=' of'  ||v||=45332.6  mse_nrm=0.009  cos=0.995  fve_nrm=0.837
+    Educational/informational article format: a structured FAQ or trivia answer about a geographic or political topic, likely a capital city.
+    
+    The question "What is the capital of" signals a question-answer format, strongly anticipating a specific answer about a country or state, likely a capital location or geographic fact.
+    
+    Final token "What is the capital of" opens a question beginning a factual query ("What is the capital of"), immediately requiring a noun phrase like "Australia," "Canada," or "New Zealand?" to specify the subject. or "South Sudan?" or "the state of Montana?" or "France?" or "Zimbabwe?" or "Peru?" or "Italy?" or "the."
+
+[  9]  PROMPT  token=' France'  ||v||=53510.3  mse_nrm=0.004  cos=0.998  fve_nrm=0.932
+    Educational/informational article format: a structured answer or quiz format about a country, likely France, or a capital city.
+    
+    The opening question "What is the capital of France" signals a factual or geographic answer is expected, likely a list or answer about France's capital.
+    
+    Final token "France" opens a formal question ("What is the capital of France"), immediately requiring a question mark or noun phrase like "?" or "France?" to complete the question, likely beginning a structured answer or topic. or "France?" or "or France?" or "Paris?" or "and France?" or "or France?" or "or Paris?" or "country?" or "and."
+
+[ 10]  PROMPT  token=' and'  ||v||=39577.5  mse_nrm=0.011  cos=0.995  fve_nrm=0.812
+    Educational/quiz format established: a question or prompt about a country, likely a factual geography or trivia question about France.
+    
+    The opening question "What is the capital of France and" signals a structured list or multi-question format, implying a brief factual answer about Paris or its capital.
+    
+    Final token "What is the capital of France and" opens a question prompt ("What is the capital of France and"), immediately requiring a continuation like "what is its capital?" or "its name?" or "describe its location?" or "what city?" or "France?" or "what is a famous landmark there?" or "its capital?" or "describe its country?" or "what year."
+
+[ 11]  PROMPT  token=' what'  ||v||=54626.8  mse_nrm=0.009  cos=0.995  fve_nrm=0.844
+    Educational/informational answer format: a structured response about a country, likely a trivia or geography question about Paris/London.
+    
+    The question beginning "What is the capital of France and what" signals a multi-question or request for facts, implying a list or specific item about Paris or its capital.
+    
+    Final token "what and what" opens a paired question ("What is the capital of France and what"), expecting a continuation like "is it famous for?" or "are three attractions/facts about it?" or "is the population?" or "river does it border?" or "famous landmark is there?" or "are some interesting facts about it?" or "country/state is."
+
+[ 12]  PROMPT  token=' is'  ||v||=51029.3  mse_nrm=0.012  cos=0.994  fve_nrm=0.792
+    Educational/structured format: a quiz or exam prompt with a multi-choice question about Paris, implying a factual answer about a country.
+    
+    The question "Name the capital of France, what is its capital and what is" signals a list or multiple-question request, likely a brief trivia or travel fact about Paris.
+    
+    Final token "what is" opens a noun phrase describing a specific item or characteristic about Paris — "Name the capital of France and what is" expects a descriptive question like "it known for?" or "a famous attraction it is known for?" or "one interesting fact about it?" or "the city located near it?" or "it famous for its Eiffel Tower."
+
+[ 13]  PROMPT  token=' it'  ||v||=52223.1  mse_nrm=0.014  cos=0.993  fve_nrm=0.757
+    Educational/FAQ format: a structured list of multiple choice questions about Paris, likely a geography or trivia quiz.
+    
+    The question "What is Paris, France's capital and what is it" signals a list of multiple choice questions about Paris, establishing a brief factual description of the city.
+    
+    Final token "what is it" opens a list of descriptive attributes about Paris ("Paris, France capital, what is it... and what is it"), requiring a noun phrase like "known for?" or "called for?" or "famous for?" or "located on the Seine River?" or "capital/city?" or "famous for its attractions?" or "called/inhabitants?" or "."
+
+[ 14]  PROMPT  token=' known'  ||v||=57561.9  mse_nrm=0.006  cos=0.997  fve_nrm=0.899
+    Educational/FAQ format established: a structured answer to a question about a city, likely a trivia or geography question about Rome/Paris.
+    
+    The prompt "What is New York City known" signals a list of multiple-choice questions, establishing a list of items to answer about famous things or characteristics of the city.
+    
+    Final token "what is it known" opens a question listing characteristics ("What is it known"), requiring a completion like "for" or "for being famous for" to specify the list of things the city is known for. or "for?" or "for for?" or "for in the world?" or "for its..." or "for its architecture/fashion?"
+
+[ 15]  PROMPT  token=' for'  ||v||=47954.2  mse_nrm=0.014  cos=0.993  fve_nrm=0.766
+    Structured educational/FAQ format established: a question posed about Paris, likely a trivia or geography question about a city.
+    
+    The prompt "What is Paris known for" signals a list or enumeration of topics, implying a multi-question answer about famous attractions or characteristics of Paris.
+    
+    Final token "what is it known for" ends a question prompt ("Paris is known for what is it known for"), immediately requiring a question mark or a list/description of notable things, likely "?" or "its iconic attractions" or "?" or "?" or "in fashion, art, and culture?" or "famous things?" or "or what?" or "its buildings/landmarks?" or "."
+
+[ 16]  PROMPT  token='?'  ||v||=47212.3  mse_nrm=0.023  cos=0.989  fve_nrm=0.603
+    Structured answer/essay format established: a factual, informative response about Paris, likely a travel or geography article.
+    
+    The question "What is Paris known for and what is it famous for?" signals a detailed list or enumeration of characteristics, promising multiple aspects of the city.
+    
+    Final token "?" closes a introductory question ("What is Paris known for and its history?"), immediately expecting a structured answer or paragraph beginning, likely "Paris is known for..." or "Paris" to answer the multi-faceted question about the capital. or "The City of Lights" or "Paris is known for..." or "Paris, its capital..." or "The city is famous for..." or "Paris is."
+
+[ 17]  PROMPT  token='<end_of_turn>'  ||v||=54324.4  mse_nrm=0.048  cos=0.976  fve_nrm=0.164
+    Answer/response format: a structured informational answer to a search query about what people know, establishing a chatbot/AI answer about a common question.
+    
+    The question "What is a human?" signals a brief, informative answer about a search query, likely a search-engine or educational answer about the topic.
+    
+    Final token "。" ends a response/answer label ("Answer to a common informational question with a detailed explanation."), strongly expecting a period or a closing/label like "。" or "answer" or "image" to indicate a structured informational response about the Google search. or "dataset" or "paragraph" or "the answer: a brief..." or "copyright ©" or "."
+
+[ 18]  PROMPT  token='\n'  ||v||=45986.6  mse_nrm=0.014  cos=0.993  fve_nrm=0.761
+    Educational/informational article format: a structured answer about capital cities, establishing a factual answer about France's capital.
+    
+    The opening question "The capital of France is Paris" signals a definitive answer, strongly expecting a specific city name or answer about Paris as the capital of France.
+    
+    Final token "e.g." introduces a concrete example list ("The capital of France is..."), requiring a city name like "Paris" or "Paris, France" to complete the answer. or "Paris" or "Paris is the capital." or "Paris, the capital of France" or "Paris" to immediately identify the city. or "Paris, the capital of France, is..."
+
+[ 19]  PROMPT  token='<start_of_turn>'  ||v||=47263.0  mse_nrm=0.011  cos=0.994  fve_nrm=0.807
+    Article/FAQ format established: a structured informational piece about Paris, likely covering major cities or capitals, implying encyclopedic content.
+    
+    The phrase "Paris is often called the 'City of Love' and the capital of France" signals a listicle or overview of Paris, establishing a definitive list of cultural/tourism attractions.
+    
+    Final token "e.g." introduces a concrete example list ("Paris..."), requiring a noun phrase like "Paris" or "the capital of France" to complete the city name. or "Paris, France" or "the City of Lights" or "Paris, the capital" or "a metropolis, or romantic city." or "French capital" or "."
+
+[ 20]  PROMPT  token='model'  ||v||=57081.1  mse_nrm=0.019  cos=0.990  fve_nrm=0.670
+    Structured FAQ format established: a warm, informative answer beginning, signaling a factual, encyclopedic response about the Eiffel Tower.
+    
+    The intro "The Eiffel Tower is a huge landmark!" signals a clear, accessible answer, typical of a conversational FAQ/educational post.
+    
+    Final token "!" closes a formal greeting ("..."), immediately expecting a structured answer, likely starting with a header or paragraph like "The" or "1" to begin a factual answer about the Eiffel Tower. or "!" or "Here" or "The Eiffel Tower" to establish the answer. or "The answer:" or "Okay, here's..." or "About the Eiffel Tower" or "2. It."
+
+[ 21]  PROMPT  token='\n'  ||v||=53109.1  mse_nrm=0.013  cos=0.993  fve_nrm=0.773
+    Structured FAQ format established: a warm, informative answer beginning, promising a definitive answer to a specific question about Paris' capital.
+    
+    The opening question "The capital of France is Paris!" signals an answer is being delivered, likely a concise, factual answer about the capital.
+    
+    Final token "!" closes a introductory paragraph (""), immediately expecting a direct answer, likely starting with "The capital of France is Paris." or a formatted answer explaining the capital. or "The capital of France is Paris. The capital of Italy is Rome." or "The capital of France is..." to begin the answer. or "The capital is Paris! The capital is..." or "The capital of Rome is..."
+
+[ 22]  REPLY   token='The'  ||v||=51686.1  mse_nrm=0.008  cos=0.996  fve_nrm=0.866
+    Structured FAQ format established: a formal answer beginning to answer a question about the capital of France.
+    
+    The opening question "Paris is the capital of France!" signals a direct, informative answer, promising a definitive answer to the capital question.
+    
+    Final token "The" opens a new sentence beginning a formal answer ("The capital of France is..."), immediately requiring a noun phrase like "capital of France is Paris" to begin the answer. or "capital of France is Paris" or "capital of France is Paris. The" to introduce the answer. or "capital of France is Paris, the capital of France is..." or "capital of France is Paris." or "capital of France is."
+
+[ 23]  REPLY   token=' capital'  ||v||=55489.5  mse_nrm=0.010  cos=0.995  fve_nrm=0.829
+    Structured FAQ format established: a factual answer to a question about Paris, signaling a concise informational response.
+    
+    The opening question "The capital" signals a direct answer to a common FAQ, establishing a definitive answer about Paris being the capital of France.
+    
+    Final token "The capital" opens a formal answer to a FAQ ("The capital"), immediately requiring a noun phrase like "of France is Paris" to begin the answer. or "of France is Paris" to answer the question. or "capital of France is Paris" or "of France is Paris" or "city of France is Paris." or "of France is Paris of France is Paris." or "of France is Paris." or."
+
+[ 24]  REPLY   token=' of'  ||v||=45625.8  mse_nrm=0.009  cos=0.996  fve_nrm=0.847
+    Structured FAQ format established: a question-answer article promising factual information about Paris' capital, signaling a direct answer.
+    
+    The opening phrase "The capital of" begins a definitive answer, fulfilling the stated question about the capital of France, confirming Paris as the answer.
+    
+    Final token "The capital of" opens a formal introductory answer ("The capital of"), immediately requiring a noun phrase like "France" to begin the answer. or "France is Paris" to directly answer the question. or "France is Paris" or "France is France is..." or "France is France is located in..." or "France is France is..." or "France is France is in France is Paris." or."
+
+[ 25]  REPLY   token=' France'  ||v||=44159.2  mse_nrm=0.009  cos=0.996  fve_nrm=0.853
+    Structured FAQ format established: a formatted answer beginning "The capital of France" signals a clear, informative answer to a common question.
+    
+    The opening question "The capital of France" promises a definitive answer, establishing a factual, educational answer about Paris.
+    
+    Final token "The capital of France" opens a formal answer ("The capital of France"), immediately requiring a completion like "is Paris" or "is Paris!" to answer the question. or "is" to begin the answer. or "is Paris" or "is...". or "is Paris is" or "is the capital of Paris." or "is Paris is..." or "is obviously..." or "is Paris." or."
+
+[ 26]  REPLY   token=' is'  ||v||=47156.4  mse_nrm=0.008  cos=0.996  fve_nrm=0.861
+    Structured FAQ format established: a concise answer to a question about a capital city, signaling a factual, educational response.
+    
+    The answer beginning "The capital of France is" signals a direct answer to a specific geographic question, establishing the answer that Paris is the capital of France.
+    
+    Final token "The capital of France is" opens a definitive answer statement ("The capital of France is"), immediately requiring a noun phrase like "Paris" or "Paris, France" to complete the answer. or "Paris." or "Paris (or **Paris**)" to specify the city name. or "Paris." or "Paris, located in Paris." or "Paris!" or "Paris, France."
+
+[ 27]  REPLY   token=' **'  ||v||=45081.4  mse_nrm=0.007  cos=0.996  fve_nrm=0.873
+    Structured FAQ/article format established: a factual answer to a question about capital cities, signaling a definitive answer about France's capital.
+    
+    The answer begins a specific geographic answer ("The capital of France is **"), strongly anticipating a well-known answer like Paris, establishing a list or enumeration of capital cities.
+    
+    Final token "**" opens a formal answer to a named city question ("The capital of France is **"), immediately requiring a city name like "Paris" to complete the answer. or "Paris, France" or "Paris" to specify the capital of Paris. or "Paris (Paris)" or "Paris, France." or "Paris" or "Paris, France."
+
+[ 28]  REPLY   token='Paris'  ||v||=45208.1  mse_nrm=0.012  cos=0.994  fve_nrm=0.787
+    Structured FAQ format established: a question-answer answer beginning, signaling a definitive, informative answer about Paris as a capital.
+    
+    The opening question "The capital of France is definitely Paris" signals a factual, educational answer about the city, likely covering geography, culture, or tourism.
+    
+    Final token "Paris" opens a formal answer ("The capital of France is Paris"), immediately requiring a city name or a structured answer like "!" or "." to introduce the answer. or " (France)". or "or Paris." to name the city. or " ." or "or". or "It is located..." or "Paris." or "!" or "or the City of Love." or."
+
+[ 29]  REPLY   token='**.'  ||v||=49022.1  mse_nrm=0.022  cos=0.989  fve_nrm=0.619
+    Structured FAQ format established: a formal, informative answer beginning, signaling a comprehensive list-based answer about Paris.
+    
+    The opening question "Paris is famously known as...is Paris." signals an immediate, definitive answer, promising a comprehensive list of things Paris is known for.
+    
+    Final token "Paris is known for being Paris." ends a introductory answer header ("Paris is the capital of France."), strongly expecting a structured list or paragraph beginning like "It is one of the most famous cities in the world." or "It is famously..." to enumerate its many roles. or "Paris is a hugely famous city." or "and it is..." or "It is a tremendously famous city." or "."
+
+[ 30]  REPLY   token='\n\n'  ||v||=54269.4  mse_nrm=0.019  cos=0.990  fve_nrm=0.668
+    Structured FAQ format established: a definitive, informative answer promising comprehensive facts about Paris, signaling a detailed listicle response.
+    
+    The opening "Paris is famous for a LOT of things!" signals a direct answer, now establishing a list of key things Paris is known for.
+    
+    Final token "
+    
+    " ends a structured introduction ("Paris is famous for its history, culture, and grandeur."), immediately requiring a new paragraph beginning "Paris is famous for..." or "Paris is famous for a LOT of things" to enumerate its notable things. or "It is famous for what Paris is famous..." or "Paris is famous for is a hugely extensive list..." or "Paris is famous...and it's."
+
+[ 31]  REPLY   token='Paris'  ||v||=56500.5  mse_nrm=0.012  cos=0.994  fve_nrm=0.796
+    Structured FAQ format established: a conversational answer beginning "Paris is famous for many things..." signals a comprehensive list of famous things about Paris.
+    
+    The opening question promises a detailed answer ("Paris"), immediately requiring a substantive list of things the city is renowned for — its global fame and multifaceted identity.
+    
+    Final token "Paris" opens a formal answer paragraph ("Paris"), immediately requiring a direct answer like "is renowned for many things" or "is famously known for..." to introduce the list of things the city is famous for. or "is a hugely famous city" or "is renowned for a vast number of things." or "is famously known for..." or "is a very multi-thing."
+
+[ 32]  REPLY   token=' is'  ||v||=61824.2  mse_nrm=0.010  cos=0.995  fve_nrm=0.831
+    Structured FAQ format established: a conversational answer beginning "Paris is" signals a comprehensive list of famous things about Paris.
+    
+    The opening question promises a detailed answer ("Paris is famous for..."), immediately requiring a list of iconic things the city is renowned for, covering culture, landmarks, and global fame.
+    
+    Final token "Paris is" opens a direct answer to the question ("Paris is"), requiring a noun phrase like "renowned for countless things" or "one of the most famous cities in the world, renowned for..." to begin the expansive list of things it's famous for. or "renowned for absolutely everything!" or "famous for a huge range of things – a truly iconic city."
+
+[ 33]  REPLY   token=' known'  ||v||=58086.3  mse_nrm=0.008  cos=0.996  fve_nrm=0.863
+    Structured FAQ format established: a definitive, informative answer to a question about Paris' famous things, signaling encyclopedic enumeration.
+    
+    The opening "Paris is known" signals a formal answer beginning, promising a list of things Paris is known for — the vast, multi-category list of global fame factors.
+    
+    Final token "Paris is known" opens a formal answer ("Paris is known"), immediately requiring a list-introducing phrase like "for many things" or "for a huge number of things" to establish the enumeration of famous things. or "for so many things!" or "for a myriad of things – globally famous and iconic." or "for many things, primarily..." or "as."
+
+[ 34]  REPLY   token=' for'  ||v||=50690.3  mse_nrm=0.010  cos=0.995  fve_nrm=0.826
+    Structured FAQ format established: a definitive, encyclopedic answer to a question about Paris, signaling a list of iconic things.
+    
+    The opening "Paris is renowned for" signals a list-introduction, promising a comprehensive enumeration of iconic things Paris is known for — culture, fashion, landmarks, etc.
+    
+    Final token "Paris is known for" opens a list-introducing answer ("Paris is known for"), immediately requiring a noun phrase like "so many things" or "a vast array of things" to establish the iconic list of reasons. or "a LOT of things." or "so many things: fashion, art, romance..." or "being a global icon." or "many things –."
+
+[ 35]  REPLY   token=' *'  ||v||=52049.6  mse_nrm=0.007  cos=0.997  fve_nrm=0.881
+    Structured answer format established: a conversational, informative FAQ explaining Paris' cultural significance, building a list of iconic things.
+    
+    The opening "Paris is known for *": signals a list-introduction answer, promising extensive, multi-category cultural significance of Paris.
+    
+    Final token "Paris is known for *" opens a list-answer clause ("Paris is known for *"), immediately requiring a list or enumeration of things, likely "so much" or "a huge amount of things" to introduce the extensive list of iconic things. or "many things" or "so much!" or "a lot." or "so many things" or "so much, including..." or "a huge amount of."
+
+[ 36]  REPLY   token='a'  ||v||=46844.4  mse_nrm=0.010  cos=0.995  fve_nrm=0.823
+    Structured answer format established: a conversational, encyclopedic response explaining Paris' cultural significance, building a list of iconic things.
+    
+    The opening "Paris is known for...a" signals a list-introduction, promising extensive enumeration of things Paris is known for — the overwhelming, iconic list of cultural/economic things.
+    
+    Final token "for a" opens a noun phrase beginning a list-answer ("Paris is known for...a"), immediately requiring a noun like "lot of things" or "huge amount of things" to introduce the expansive list of things Paris is famous for. or "lot" or "very, very long list." or "lot, basically everything!" or "huge amount."
+
+[ 37]  REPLY   token=' lot'  ||v||=53984.2  mse_nrm=0.010  cos=0.995  fve_nrm=0.830
+    Structured FAQ format established: a listicle answering a question about iconic cities, building a comprehensive, celebratory overview of Paris.
+    
+    The opening "Paris is famous for a lot" signals an introductory answer, promising expansive enumeration of defining characteristics, likely covering culture, history, and iconic things.
+    
+    Final token "Paris is famous for a lot" opens a broad introductory clause ("Paris is famous for a lot"), strongly expecting a continuation like "of things" or "things! It's practically endless," or "of things, so here..." to introduce a list of defining attributes. or "—a huge range of things!" or "things, actually!" or "of things, so here."
+
+[ 38]  REPLY   token='*'  ||v||=46534.5  mse_nrm=0.010  cos=0.995  fve_nrm=0.825
+    Structured answer format established: a listicle explaining iconic global cities, building a celebratory, informative tone about Paris.
+    
+    The opening "Paris is famous for a LOT" signals an introductory answer promising extensive lists of things Paris is known for, establishing a comprehensive, encyclopedic register.
+    
+    Final token "Paris is known for a lot*" opens a list-introducing clause ("Paris is known for a *lot*"), strongly expecting a continuation like "—here are some things" or "things, so it's hard to summarize" or "because it's iconic!" or "but primarily for the following:" or "things! It's legendary...". or "of things, so."
+
+[ 39]  REPLY   token='!'  ||v||=64889.4  mse_nrm=0.007  cos=0.996  fve_nrm=0.878
+    Structured FAQ format established: answer to a question about Paris's cultural significance, building a comprehensive overview.
+    
+    The opening answer "Paris is famous for SO much!" signals a list-based, summarizing response, promising extensive categories of significance.
+    
+    Final token "Paris has a lot to offer!" opens a list-introduction ("Paris is famous for a lot!"), immediately expecting a list or enumeration of key things, likely "Here are just a few:" or "It's difficult to summarise..." or "Here are some highlights:" or "It's famously known as a sprawling, multifaceted city..." or "Here's a brief summary:". or "It's practically impossible."
+
+[ 40]  REPLY   token=' Here'  ||v||=60917.9  mse_nrm=0.009  cos=0.996  fve_nrm=0.853
+    Structured answer format established: a FAQ/answer pattern promising comprehensive cultural and historical overview of Rome.
+    
+    The intro "Rome is famous for a huge range of things. Here" signals an immediate list-answer response, promising key topics about the city's significance.
+    
+    Final token "Here" opens a list-introducing clause ("It's a huge, globally significant place. Here"), requiring a noun phrase like "are some highlights" or "are some of the key things" to enumerate the extensive list of topics. or "is a summary of its highlights:" or "are some highlights, broken down:" or "are a few key things:" or "are a summary of what."
+
+[ 41]  REPLY   token="'"  ||v||=48221.7  mse_nrm=0.014  cos=0.993  fve_nrm=0.756
+    Structured article format: a listicle/FAQ pattern establishing a comparative overview of Paris's cultural tourism, likely covering tourism or geography.
+    
+    The opening sentence "Paris is renowned globally for its cultural attractions" signals a list of iconic attractions, establishing examples of famous Parisian places or landmarks.
+    
+    Final token "e.g." introduces a concrete list of examples of Paris's cultural attractions ("known for..."), requiring a noun phrase like "the Eiffel Tower," "iconic landmarks," or "the Eiffel Tower, Louvre Museum" to name famous attractions. or "famous architecture, art, and romance." or "iconic buildings, fashion." or "the Eiffel Tower, world famous art."
+
+[ 42]  REPLY   token='s'  ||v||=65582.9  mse_nrm=0.008  cos=0.996  fve_nrm=0.868
+    Structured answer format established: a conversational FAQ/advice answer explaining iconic things about Paris, signaling a list-based response.
+    
+    The opening "It's a huge topic! Here's" promises a list of notable things about the city, now delivering that enumeration of key aspects.
+    
+    Final token "Here's" opens a list-introducing clause ("Here's"), immediately requiring a noun phrase like "a breakdown of some of its highlights" or "a list of things" to summarize the extensive topics of her notable qualities. or "a summary/overview:" or "some key points:" or "a fairly extensive list, covering categories:" or "a summary of what it."
+
+[ 43]  REPLY   token=' a'  ||v||=62288.2  mse_nrm=0.005  cos=0.998  fve_nrm=0.919
+    Structured answer format established: a conversational, informative FAQ explaining cultural significance of Paris/Rome, signaling a list of rich things.
+    
+    The intro "Paris is packed with so much history, culture, and significance – here's a" promises a comprehensive list of notable things, answering the question of varied aspects.
+    
+    Final token "a" opens a noun phrase beginning a list-introduction ("Here's a"), immediately requiring a noun like "summary/overview" or "list" to introduce the extensive enumeration of things Paris is known for. or "bit of what it covers." or "overview of some of its many things." or "detailed list, because it's impossible to."
+
+[ 44]  REPLY   token=' breakdown'  ||v||=69471.6  mse_nrm=0.006  cos=0.997  fve_nrm=0.888
+    Structured answer format established: a conversational, informative FAQ explaining why Rome is significant, building a comprehensive list of cultural/historical contributions.
+    
+    The intro "It's huge! Here's a breakdown" promises a list of key areas of significance, signaling a summary answer of notable things about Rome.
+    
+    Final token "a breakdown" opens a list-introducing clause ("Here's a breakdown"), immediately requiring "of some key areas" or "of its notable things" to introduce the enumerated list of topics. or "of what it's known for:" or "of key categories:" or "of some things, covering broad areas:" or "of its notable aspects:" or "."
+
+[ 45]  REPLY   token=' of'  ||v||=66516.3  mse_nrm=0.005  cos=0.997  fve_nrm=0.910
+    Structured FAQ format established: answer promises a list of things Paris is known for, building a comprehensive answer.
+    
+    The phrase "Here's a brief list of what Paris is famous for – a summary of" signals an immediate enumeration of key categories/examples of its fame.
+    
+    Final token "of" opens a noun phrase completing the answer clause ("Here's a list of...This is a brief overview of"), requiring a noun like "what it's famous for" or "some of its key things/aspects." to specify the list of things it's famous for. or "what it's known for, among many things." or "its major things/."
+
+[ 46]  REPLY   token=' what'  ||v||=60895.6  mse_nrm=0.012  cos=0.994  fve_nrm=0.794
+    Structured FAQ/answer format established: a conversational, informative piece explaining Paris' famous global significance.
+    
+    The intro "It's best known for a huge range of things – history, art, culture...that's what" signals a summary answer listing key things Paris is famous for.
+    
+    Final token "what" opens a relative clause ("key things for what..."), requiring a noun phrase like "it's famous for" or "makes it renowned" to specify the list of notable things Paris is known for. or "it's famous for, primarily:" or "she's renowned for, often." or "it dominates/defines its fame, particularly its iconic..."
+
+[ 47]  REPLY   token=' it'  ||v||=63291.0  mse_nrm=0.009  cos=0.996  fve_nrm=0.846
+    Structured answer format established: a FAQ/listicle pattern explaining famous things about Paris, signaling a comprehensive, informative response.
+    
+    The intro "Here are some of the things Paris is famous for – the main things it" promises a list of iconic things, now delivering specific examples of fame/renown.
+    
+    Final token "what it" opens a relative clause defining "famous things about it" ("for what it's famous for...list of what it"), requiring a noun phrase like "is known for" or "is renowned for" to complete the answer. or "is renowned for, particularly for:" or "is famous for, often called/renowned for." or "is famous."
+
+[ 48]  REPLY   token="'"  ||v||=49034.7  mse_nrm=0.008  cos=0.996  fve_nrm=0.862
+    Structured FAQ/listicle format established: a response explaining Paris's global cultural significance, likely a factual answer about famous attractions.
+    
+    The phrase "Paris is known as the City of Love, a global capital" signals a list or enumeration of cultural/economic domains, establishing a descriptive, encyclopedic register.
+    
+    Final token "e.g." introduces a list of examples of Parisian cultural domains ("Paris...renowned..."), requiring a noun phrase like "fashion, art, cuisine" or "the fashion capital" to complete the iconic examples of Paris. or "romance, art, cuisine" or "a fashion capital, museums." or "the fashion industry" or "renowned cuisine."
+
+[ 49]  REPLY   token='s'  ||v||=62716.3  mse_nrm=0.006  cos=0.997  fve_nrm=0.902
+    Structured answer format established: a conversational/educational FAQ explaining Paris' famous things, promising comprehensive list of reasons.
+    
+    The intro "Here's a summary of what Paris is known for – here's what it's" signals a direct answer listing iconic categories of fame, like culture, art, landmarks.
+    
+    Final token "what it's" opens a relative clause defining the list ("here are some of what Paris is known for what it's"), requiring a noun phrase like "known for" or "famous for" to complete the sentence. or "renowned for, primarily for its iconic..." or "known for globally, especially for..." or "renowned for, often."
+
+[ 50]  REPLY   token=' famous'  ||v||=56075.8  mse_nrm=0.007  cos=0.997  fve_nrm=0.883
+    Structured FAQ/listicle format established: a pedagogical answer explaining global fame of Paris, building toward a comprehensive list of things it's known for.
+    
+    The opening phrase "Here's a list of things Paris is famous" promises an enumeration of specific fame categories, now delivering the answer of what it's famous for.
+    
+    Final token "famous" opens a noun phrase completing the introductory clause ("here's what Paris is famous"), requiring a noun like "for" to complete the list-introducing phrase. or "for for:" or "for around the world:" or "for, primarily known for:" or "for, including:" or "for its reputation/things."
+
+[ 51]  REPLY   token=' for'  ||v||=51885.8  mse_nrm=0.007  cos=0.997  fve_nrm=0.884
+    Structured FAQ format established: answer promises a list of things Paris is famous for, building a comprehensive overview.
+    
+    The phrase "Here's a list of what Paris is famous for" signals an enumeration of categories/highlights, now delivering the actual list of famous things.
+    
+    Final token "what Paris is famous for" opens a list-introducing clause ("Here's a summary of what Paris is famous for"), requiring a colon or continuation like "in categories" or "across various areas:" to enumerate the extensive categories of fame. or "— broadly:" or "in several categories:" or " , often categorized as:" or " (some key areas): Culture, history, fashion..."
+
+[ 52]  REPLY   token=':'  ||v||=52135.2  mse_nrm=0.010  cos=0.995  fve_nrm=0.823
+    Structured FAQ/article format established: a Wikipedia-style answer explaining Paris's global city status, covering major attractions.
+    
+    The opening list pattern "Paris is widely known for many things, including:" signals an enumeration of iconic Parisian attractions, establishing a list of famous landmarks or cultural icons.
+    
+    Final token "renowned for:" opens a list of defining characteristics ("Paris is globally renowned for..."), immediately requiring a noun phrase like "culture, fashion, romance" or "landmarks, fashion, art" to enumerate iconic Parisian attractions. or "the Eiffel Tower, fashion, romance" or "Culture and Romance:". or "fashion, art, romance, iconic landmarks." or "called the."
+
+[ 53]  REPLY   token='\n\n'  ||v||=49019.6  mse_nrm=0.012  cos=0.994  fve_nrm=0.792
+    Structured FAQ format established: a answer promising comprehensive lists of iconic things about Rome/Paris, signaling a detailed, organized response.
+    
+    The intro "Here are the reasons Rome is famous – its major significance is huge!" signals a list-based breakdown of key categories of reasons.
+    
+    Final token "
+    
+    " closes a list-introduction ("Here are the things Rome is famous for:
+    
+    "), immediately requiring a bulleted list or categorical breakdown, likely "• **Culture & History:**" or "• **Major Categories:**" to enumerate the iconic reasons. or "• **Cultural/Economic:**" or "• **In the City:**" or "• **Key things:**" or."
+
+[ 54]  REPLY   token='**'  ||v||=68532.9  mse_nrm=0.006  cos=0.997  fve_nrm=0.893
+    Structured answer format established: a conversational/FAQ response explaining Paris' iconic status, building a list of famous things.
+    
+    The intro "Paris is famous for many things: iconic landmarks, culture, history..." signals a list-based enumeration of major categories of attractions, likely covering iconic landmarks, culture, and romance.
+    
+    Final token "**" opens a categorized list ("**Main Things: **"), immediately requiring a structured list of categories like "Culture/landmarks, Iconic Attractions" to enumerate the famous things Paris is known for. or "Iconic Landmarks/Culture:" or "Key Attractions/Cultural/Romantic:" or "Famous Things: Art, Fashion, Romance." or "General/."
+
+[ 55]  REPLY   token='Icon'  ||v||=59361.7  mse_nrm=0.008  cos=0.996  fve_nrm=0.854
+    Structured answer format: a listicle/FAQ pattern explaining Paris' cultural identity, establishing a comparative, informative tone.
+    
+    The phrase "Reasons Paris is Famous: Iconic Landmarks, Culture, Icon" signals a numbered list of categories, promising specific iconic elements of Paris that define its tourism/recognition.
+    
+    Final token "Icon" begins a list of categories ("Icon"), immediately requiring a noun phrase like "ic Landmarks," "Iconic Buildings/landmarks" to enumerate the famous attractions of Paris (Eiffel Tower, Louvre, etc.). or "ic Landmarks & Attractions:" or "ic Buildings/landmarks: Eiffel Tower, Louvre..." or "ic Landmarks and Architecture:" or "ic Imagery/symbols."
+
+[ 56]  REPLY   token='ic'  ||v||=68323.3  mse_nrm=0.007  cos=0.997  fve_nrm=0.882
+    Structured FAQ/listicle format established: a response explaining Paris's cultural tourism, answering a question about famous cities.
+    
+    The phrase "Paris is known for: Iconic Landmarks, Iconic" signals a list of categories, promising enumeration of recognizable cultural/tourism assets that define Paris globally.
+    
+    Final token "Iconic" opens a list of categories defining Paris's recognizability ("Main Attractions: Iconic"), immediately requiring a noun phrase like "Landmarks," "Buildings/landmarks," or "Landmarks and Attractions." to list the iconic sights like the Eiffel Tower. or "Architecture/landmarks:" or "Structures: Eiffel Tower, Louvre." or "landmarks, Culture, and Attractions." or."
+
+[ 57]  REPLY   token=' Landmarks'  ||v||=49845.8  mse_nrm=0.009  cos=0.995  fve_nrm=0.842
+    Structured listicle format established: a structured answer explaining Paris's tourism/culture, promising categories of famous things.
+    
+    The intro "Top Reasons to Visit: Iconic Landmarks" signals a numbered list of categories, establishing a list of iconic Parisian attractions like Eiffel Tower, Louvre, etc.
+    
+    Final token "Iconic Landmarks" opens a numbered list category ("Iconic Landmarks"), immediately requiring a colon or bullet point to enumerate specific examples like "and Architecture:" or "and Attractions:" to define the first category of iconic sights. or "•:". or "and Buildings:" or "and Attractions:". or "• Eiffel Tower:". or "and Architecture:" or "and Iconic Buildings."
+
+[ 58]  REPLY   token=':**'  ||v||=48686.0  mse_nrm=0.009  cos=0.995  fve_nrm=0.839
+    Structured listicle format established: a structured answer explaining Paris' tourism/cultural significance, building a comprehensive global travel argument.
+    
+    The intro "Paris is famous for iconic landmarks:" promises a list of iconic attractions, signaling enumeration of major attractions like the Eiffel Tower, Louvre, etc.
+    
+    Final token "Iconic Landmarks:" ends a list-introducing category header ("Iconic Landmarks:"), immediately requiring a bulleted list of iconic Parisian attractions, likely starting with "• The Eiffel Tower, Louvre Museum..." or "This is probably the biggest: Eiffel Tower." or "• The Eiffel Tower, obviously..." or "Famous landmarks like..." or "• Louvre, Eiffel Tower, Arc de Tri."
+
+[ 59]  REPLY   token='\n\n'  ||v||=44211.6  mse_nrm=0.019  cos=0.990  fve_nrm=0.664
+    Structured FAQ format established: a clear, organized answer explaining cultural significance of Rome/US, building a list of iconic things.
+    
+    The promised list pattern: "Iconic Landmarks/Things (Major category):" signals a bulleted list of categories, beginning the first major category of iconic things people know about Rome.
+    
+    Final token "Iconic Landmarks
+    
+    " ends a category header ("Iconic Landmarks:
+    
+    "), immediately expecting a bulleted list or numbered entries like "• •" or "•••" to enumerate landmark examples. or "•••••••••••" or "••••••: The Colosseum, Eiffel Tower."
+
+[ 60]  REPLY   token='*'  ||v||=52255.0  mse_nrm=0.017  cos=0.992  fve_nrm=0.708
+    Structured FAQ format established: a listicle answering a question about famous global landmarks, signaling enumeration of iconic attractions in Paris.
+    
+    The intro "Paris is famous for many iconic attractions:" promises a list, strongly anticipating specific named examples of attractions/landmarks that France is famous for.
+    
+    Final token "*": opens a bulleted list of landmarks ("Paris, France – famous attractions include:"), immediately requiring a first bullet point like "• Eiffel Tower" or "• Eiffel Tower:". or "**The Louvre Museum:**" to enumerate specific attractions. or "Eiffel Tower: The iconic..." or "The Louvre:". or "• **Eiffel Tower:**" or "The Louvre,."
+
+[ 61]  REPLY   token=' **'  ||v||=65447.2  mse_nrm=0.008  cos=0.996  fve_nrm=0.860
+    Structured article format: a listicle/FAQ pattern establishing a comprehensive overview of France's cultural tourism, covering travel and tourism.
+    
+    The intro "Paris is famous for iconic landmarks: major attractions include... **" signals a list of iconic landmarks, establishing a list of famous Parisian attractions.
+    
+    Final token "**" begins a list of iconic landmarks in Paris ("Major attractions: **"), strongly expecting a specific named attraction like "Eiffel Tower," "Eiffel Tower, Louvre Museum" to name the classic Parisian landmarks. or "Eiffel Tower:". or "The Eiffel Tower" or "Louvre Museum: iconic symbol." or "Eiffel Tower, Louvre, and iconic buildings."
+
+[ 62]  REPLY   token='E'  ||v||=41723.0  mse_nrm=0.012  cos=0.994  fve_nrm=0.788
+    Structured article format: a listicle/FAQ pattern establishing a comprehensive overview of global tourism, covering travel and cultural topics.
+    
+    The intro "Paris is famous for iconic landmarks, including the Eiffel Tower, Louvre Museum..." signals a list of famous landmarks, establishing a list of iconic Parisian attractions.
+    
+    Final token "E" begins a specific landmark name ("Eiffel Tower, Eiffel Tower...E"), strongly expecting a well-known Parisian landmark like "Eiffel Tower" or "Eiffel Tower, Louvre Museum" to name iconic attractions. or "Eiffel Tower, Louvre Museum" or "Tower, Louvre, and Arc de Triomphe" to name the famous Parisian landmark.
+
+[ 63]  REPLY   token='iffel'  ||v||=51584.7  mse_nrm=0.010  cos=0.995  fve_nrm=0.819
+    Structured listicle format established: a factual, educational article about Paris, covering cultural/economic topics.
+    
+    The intro "Paris is famous for many attractions, including the Eiffel" signals a list of iconic landmarks, establishing a named list of famous Parisian attractions (e.g., Eiffel Tower, Louvre).
+    
+    Final token "Eiffel" begins a well-known landmark name ("Eiffel Tower...Eiffel"), immediately requiring a noun like "Tower" or "Tower, Louvre Museum" to name the iconic Parisian landmark. or "Tower, Eiffel Tower" or "Tower, the Eiffel Tower" to specify the iconic structure. or "Tower, the Eiffel" or "Tower, the iconic."
+
+[ 64]  REPLY   token=' Tower'  ||v||=46911.4  mse_nrm=0.010  cos=0.995  fve_nrm=0.833
+    Structured listicle format established: a numbered/bulleted list of iconic French attractions, signaling educational content about Paris tourism.
+    
+    The intro "Paris has many iconic landmarks: Eiffel Tower" signals a list of iconic landmarks, establishing a list of famous Parisian attractions to name.
+    
+    Final token "Eiffel Tower" opens a list of iconic landmarks examples ("Iconic landmarks include: Eiffel Tower"), immediately expecting a list or parenthetical descriptor like "– The iconic symbol" or " : the famous Eiffel Tower" to define the landmark. or " : iconic, towering structure" or "– Eiffel Tower: the most recognizable." or " : iconic, steel structure" or " (Eiffel),."
+
+[ 65]  REPLY   token=':**'  ||v||=59220.6  mse_nrm=0.009  cos=0.996  fve_nrm=0.851
+    Structured listicle format established: a numbered, informative answer explaining Paris' cultural attractions, building a list of iconic landmarks.
+    
+    The intro "Top attractions: Eiffel Tower –" signals a list of iconic landmarks, with the Eiffel Tower as the first named example of Parisian icons.
+    
+    Final token "Eiffel Tower:" ends a list-defining entry ("Eiffel Tower:"), immediately expecting a list or description of iconic landmarks, likely "Perhaps the most famous," "Its iconic symbol," or "The iconic global symbol, probably its most recognizable." or "Probably the most famous, the towering steel structure." or "This iconic landmark, obviously." or "Probably its most famous attraction." or."
+
+[ 66]  REPLY   token=' Perhaps'  ||v||=55558.8  mse_nrm=0.008  cos=0.996  fve_nrm=0.858
+    Structured FAQ format: a listicle explaining travel/tourism, establishing a detailed, informative answer about Paris attractions.
+    
+    The sentence beginning "The Eiffel Tower – Perhaps" signals a list of iconic landmarks, establishing a descriptive entry about the Eiffel Tower as the most recognizable global symbol.
+    
+    Final token "Perhaps" opens a superlative noun phrase describing iconic symbols ("The Eiffel Tower – Perhaps"), immediately expecting a noun like "the most recognizable," "the most famous," or "the world's most iconic landmark." or "its most recognizable symbol." or "the most famous image globally, but..." or "the ultimate symbol of Paris, its iconic..." or "the most recognizable, its image."
+
+[ 67]  REPLY   token=' the'  ||v||=57180.3  mse_nrm=0.005  cos=0.997  fve_nrm=0.906
+    Structured FAQ format: a listicle answering travel/tourism questions, establishing a comprehensive, informative tone about Paris.
+    
+    The phrase "The Eiffel Tower is perhaps the" opens a classic listicle about iconic landmarks, establishing iconic global recognition of the Eiffel Tower as the ultimate symbol of Paris.
+    
+    Final token "perhaps the" begins a noun phrase describing the Eiffel Tower's iconic image ("Eiffel Tower – perhaps the"), requiring a noun like "most recognizable symbol," "most iconic landmark," or "most famous symbol in the world." — a superlative noun describing its iconic image. or "most recognizable symbol, globally." or "iconic image, obviously." or "most famous landmark,."
+
+[ 68]  REPLY   token=' most'  ||v||=59562.0  mse_nrm=0.007  cos=0.997  fve_nrm=0.887
+    Structured FAQ format: a listicle answering travel/tourism questions about Paris, establishing informative, encyclopedic tone.
+    
+    The sentence "The Eiffel Tower is the most" opens a classic cultural/tourism description of the Eiffel Tower, establishing iconic global recognition — a superlative descriptor like "recognizable landmark" or "famous symbol of Paris."
+    
+    Final token "the most" begins a superlative noun phrase describing the Eiffel Tower ("the Eiffel Tower – perhaps the most"), requiring a noun like "iconic," "recognizable landmark," or "famous symbol of Paris." or "recognized symbol in the world." or "famous landmark, perhaps Eiffel Tower itself." or "iconic image, globally." or "famous."
+
+[ 69]  REPLY   token=' recognizable'  ||v||=60748.1  mse_nrm=0.010  cos=0.995  fve_nrm=0.831
+    Structured FAQ format: a listicle/article explaining Paris facts, establishing informational, encyclopedic tone.
+    
+    The sentence beginning "The Eiffel Tower is one of the most recognizable" signals a factual entry about the Eiffel Tower, establishing a classic tourist/travel description of the Eiffel Tower in Paris.
+    
+    Final token "the most recognizable" opens a noun phrase describing the Eiffel Tower's iconic status ("the Eiffel Tower, the most recognizable"), strongly expecting a noun like "landmark in the world" or "structure in the world," a standard superlative descriptor for the Eiffel Tower. or "landmark in Paris, the tower." or "structure in the world, in Paris." or "landmark, a."
+
+[ 70]  REPLY   token=' landmark'  ||v||=54593.4  mse_nrm=0.009  cos=0.996  fve_nrm=0.848
+    Structured FAQ format: a listicle answering travel/tourism questions, establishing informative, encyclopedic tone about Paris.
+    
+    The sentence "The Eiffel Tower is perhaps the most recognizable landmark" sets up a global-famous example, establishing a ranking or iconic status of the Eiffel Tower.
+    
+    Final token "perhaps the most recognizable landmark" opens a parenthetical clause defining the Eiffel Tower ("the Eiffel Tower, the most recognizable landmark"), requiring completion like "in the world" or "in the world, globally iconic." or "in Paris, and possibly the world," or "of France, a symbol of..." or "in the world, representing Paris." or "of it, maybe in the world."
+
+[ 71]  REPLY   token=' in'  ||v||=51843.9  mse_nrm=0.016  cos=0.992  fve_nrm=0.730
+    Structured FAQ format: a listicle/guide pattern explaining Parisian travel, establishing informational, encyclopedic tone.
+    
+    The intro "The Eiffel Tower is one of the most recognizable landmarks in" signals a factual, encyclopedic claim about the Eiffel Tower, establishing iconic global recognition.
+    
+    Final token "most recognizable landmark in" opens a noun phrase describing the Eiffel Tower's global fame ("one of the most recognizable landmarks in"), requiring a noun like "the world" or "France," or "the world, possibly Paris." — a classic superlative descriptor for the Eiffel Tower. or "the world, and perhaps the world." or "Paris, famous for its iconic shape." or "the world."
+
+[ 72]  REPLY   token=' the'  ||v||=47866.5  mse_nrm=0.011  cos=0.994  fve_nrm=0.802
+    Structured FAQ/article format: a listicle answering a question about Paris' iconic landmarks, establishing informational, celebratory tone.
+    
+    The phrase "Eiffel Tower is one of the most iconic landmarks in the" signals a summary answer, establishing a global/cultural claim about Paris' romantic symbolism of love and fashion.
+    
+    Final token "in the" opens a noun phrase completing the noun phrase "iconic landmark in the" — "one of the most iconic landmarks in the" requires a noun like "world" or "world" to complete the phrase. or "world" or "world, often." or "city" or "whole." or "world, or France." or "."
+
+[ 73]  REPLY   token=' world'  ||v||=47467.3  mse_nrm=0.017  cos=0.992  fve_nrm=0.711
+    Structured listicle format: a numbered, informative travel/tourism post explaining Paris attractions, establishing a pattern of location-based facts.
+    
+    The sentence "Eiffel Tower: perhaps the most iconic landmark in the world" signals a parenthetical example of iconic Parisian landmarks, contrasting the Eiffel Tower's iconic status.
+    
+    Final token "in the world" opens a parenthetical clause describing the Eiffel Tower ("Eiffel Tower – one of the most recognizable structures in the world"), expecting continuation like "—a symbol of Paris." or ", a romantic, steel structure." or " , originally built..." or " , it's the Eiffel Tower." or "and iconic, offering..." or " ,."
+
+[ 74]  REPLY   token='.'  ||v||=57195.6  mse_nrm=0.008  cos=0.996  fve_nrm=0.859
+    Structured listicle format established: a numbered, educational answer explaining Parisian cultural attractions, building a list of iconic landmarks.
+    
+    The sentence "Eiffel Tower – iconic Parisian landmark." signals a list of iconic attractions, with examples of famous Parisian structures like the Eiffel Tower.
+    
+    Final token "Eiffel Tower." ends a parenthetical example list ("Eiffel Tower – iconic Parisian landmark."), strongly expecting continuation like "It was built..." or "a symbol of..." or "originally a viewing tower." or "•" or "famous for its stunning views." or "It was a landmark, originally." or "built for the World's Fair." or "tower, iconic steel structure." or."
+
+[ 75]  REPLY   token='\n'  ||v||=48425.0  mse_nrm=0.015  cos=0.992  fve_nrm=0.735
+    Article structure: a listicle/educational format explaining global tourism, establishing a comparative answer about Paris' cultural attractions.
+    
+    The phrase "Paris is renowned for iconic attractions like the Eiffel Tower, Louvre Museum, and Notre Dame" signals a list of examples of Parisian cultural/urban attractions, establishing a rich, romantic city image.
+    
+    Final token "e.g." introduces a list of examples of Parisian attractions ("Paris...renowned..."), requiring a noun phrase like "the Louvre Museum," "famous streets," or "catacombs" to complete the enumeration. or "Parisian architecture," or "the Champs-Élysées" or "fashion, art museums." or "iconic."
+
+[ 76]  REPLY   token='*'  ||v||=52078.2  mse_nrm=0.013  cos=0.994  fve_nrm=0.782
+    Structured listicle format established: a numbered/bulleted answer explaining Parisian cultural attractions, signaling enumeration of iconic landmarks.
+    The intro "Paris is famous for iconic landmarks: Eiffel Tower, Eiffel Tower..." promises a list of major attractions, building a list of famous French attractions.
+    Final token "-" ends a first bullet point ("• Eiffel Tower – Iconic landmark"), immediately requiring a second bullet point, likely "• Louvre Museum," "• Notre Dame Cathedral," or "• Arc de Triomphe" to list iconic Parisian attractions. or "• Louvre Museum:". or "Notre Dame Cathedral:". or "The Champs-Élysées:". or "Eiffel Tower, Louvre,."
+
+[ 77]  REPLY   token=' **'  ||v||=60700.9  mse_nrm=0.007  cos=0.997  fve_nrm=0.885
+    Structured listicle format established: a numbered/bulleted article promising facts about France, covering cultural and travel topics.
+    
+    The intro "France is famous for iconic landmarks: Eiffel Tower, Eiffel Tower,..." signals a list of iconic landmarks, establishing examples of famous attractions in Paris/France.
+    
+    Final token "–" begins a list of iconic Parisian landmarks ("Iconic Landmarks: Eiffel Tower, **"), immediately requiring a list of landmarks like "Louvre Museum, Notre Dame Cathedral" or "Eiffel Tower, Louvre Museum" to enumerate famous Parisian attractions. or "Arc de Triomphe" or "Notre Dame Cathedral, Louvre Museum" or "Paris River, Champs-Élys."
+
+[ 78]  REPLY   token='Lou'  ||v||=45350.7  mse_nrm=0.013  cos=0.994  fve_nrm=0.777
+    Structured listicle format established: a factual answer about Paris/travel, answering a question about famous tourist attractions.
+    
+    The question "Which museum in Paris is the most famous?" signals a list of examples, with "Louvre Museum" beginning a well-known example of a museum in Paris.
+    
+    Final token "Lou" is a truncated word beginning a famous museum name ("Lou"), immediately requiring completion like "Louvre" to name the iconic Parisian museum, likely followed by "Louvre" or "Museum" to specify the famous museum. or "Louvre, Paris" or "Louvre Museum" or "Louvre, the Mona Lisa" or "Museum, the Mona Lisa."
+
+[ 79]  REPLY   token='vre'  ||v||=49062.2  mse_nrm=0.012  cos=0.994  fve_nrm=0.794
+    Structured listicle format established: a numbered/bulleted list of famous places in Paris, answering a question about travel destinations.
+    
+    The list pattern begins: "Paris: Eiffel Tower, Notre Dame, Champs-Élysées... The Louvre" signals a well-known list of cultural attractions, establishing a named example of a famous museum.
+    
+    Final token "Louvre" opens a specific named museum entry ("Louvre"), immediately requiring a noun like "Museum" or "Museum: Louvre" to complete the iconic Parisian attraction name. or "Museum, Paris" or "Museum (including Eiffel Tower)" or "Museum: The Louvre, the largest museum in the world." or "Museum."
+
+[ 80]  REPLY   token=' Museum'  ||v||=50686.8  mse_nrm=0.011  cos=0.995  fve_nrm=0.817
+    Structured listicle format established: a numbered list of cultural/travel attractions, answering a question about Paris's top attractions.
+    
+    The first item "1. Louvre Museum" signals a list of iconic Parisian attractions, building a ranked enumeration of cultural landmarks.
+    
+    Final token "Louvre Museum" opens a named list entry ("Louvre Museum"), immediately requiring a list or description of the Louvre, likely " : home to..." or "and Mona Lisa" to specify the famous museum. or " :" or "– Home to the Mona Lisa" or " : Museum, Louvre, and art gallery" to name the first landmark. or "and the Mona Lisa:". or "and."
+
+[ 81]  REPLY   token=':**'  ||v||=63569.3  mse_nrm=0.007  cos=0.996  fve_nrm=0.874
+    Structured list format established: a numbered, ranked list of famous Parisian attractions explaining travel/cultural destinations.
+    
+    The answer promises specific examples of iconic places ("Top attractions: The Eiffel Tower, Paris...The Louvre:"), signaling a list of famous museums or institutions to name the Louvre Museum.
+    
+    Final token "The Louvre Museum:" ends a list entry defining the Louvre ("Le Louvre:"), immediately expecting a descriptive list item like "Home to the Mona Lisa, world-renowned museum" or "Home to one of the world's largest museums." or "Houses the Louvre Museum, famous for..." or "Home to the Mona Lisa, world famous museum." or "Museum, home to..."
+
+[ 82]  REPLY   token=' Home'  ||v||=58654.5  mse_nrm=0.008  cos=0.996  fve_nrm=0.868
+    Structured listicle format established: a travel/FAQ post explaining global travel impacts, building a comparative answer.
+    
+    The Louvre example begins a list of iconic museums ("The Louvre in Paris: one of the world's most famous museums, home"), signaling a list of examples of famous museums/landmarks to illustrate Paris' cultural significance.
+    
+    Final token "Home" opens a descriptive clause defining the Louvre ("The Louvre Museum, Paris: Home"), immediately requiring a list of famous artworks like "to masterpieces like the Mona Lisa" or "to the Mona Lisa, and the Mona Lisa." or "to iconic art like..." or "to the Mona Lisa, and thousands of masterpieces."
+
+[ 83]  REPLY   token=' to'  ||v||=59549.3  mse_nrm=0.006  cos=0.997  fve_nrm=0.890
+    Structured listicle format: a comparative/educational article answering travel questions, establishing facts about Paris travel.
+    
+    The Louvre Museum example is being introduced: "The Louvre Museum in Paris is home to" signals a list of iconic global museums, establishing famous examples of museums with crowds/entry lines.
+    
+    Final token "home to" opens a list of iconic artworks at the Louvre ("Louvre Museum, Paris – home to"), immediately requiring a specific famous artwork like "iconic masterpieces like the Mona Lisa" or "the Mona Lisa, Venus de Milo." or "thousands of masterpieces" or "famous works like the Mona Lisa." or "the Mona Lisa, and iconic art." or "master."
+
+[ 84]  REPLY   token=' masterpieces'  ||v||=54824.8  mse_nrm=0.006  cos=0.997  fve_nrm=0.896
+    Structured FAQ format: answer explaining travel/Paris comparisons, establishing a list-based, informative tone.
+    
+    The Louvre Museum context: "The Louvre: home to masterpieces" signals a list of iconic attractions, establishing a cultural/travel comparison point about the world-famous museum.
+    
+    Final token "masterpieces" opens a list of examples of Louvre artworks ("home to masterpieces"), immediately requiring a noun phrase like "like the Mona Lisa" or "like the Mona Lisa and Venus de Milo." to specify famous artworks. or "like art, including the Mona Lisa." or "like art, including the Mona Lisa." or "like the Mona Lisa, including art and sculpture." or "like."
+
+[ 85]  REPLY   token=' like'  ||v||=58458.6  mse_nrm=0.003  cos=0.998  fve_nrm=0.941
+    Structured FAQ format: a listicle answering travel/infrastructure questions, establishing a pattern of explaining global travel challenges.
+    
+    The Louvre example ("Paris' Louvre Museum is famous for... iconic art like") signals a list of famous museum examples, establishing a list of iconic global attractions in Paris/Europe.
+    
+    Final token "like" opens a list of famous museum examples ("the Louvre Museum in Paris, home to masterpieces like"), requiring a specific named artwork or example like "the Mona Lisa" or "the Mona Lisa and Venus de Milo." — a classic museum example of the Mona Lisa. or "the Mona Lisa" or "the Mona Lisa, Eiffel Tower." or " Mona Lisa and Venus."
+
+[ 86]  REPLY   token=' the'  ||v||=57994.6  mse_nrm=0.005  cos=0.998  fve_nrm=0.919
+    Structured listicle format: a structured FAQ/guide pattern explaining travel tourism, establishing informational comparisons of global travel destinations.
+    
+    The Louvre example is a classic, well-known museum ("Paris' Louvre Museum, home to famous art like the"), signaling a list of iconic museum examples like the Mona Lisa or Eiffel Tower.
+    
+    Final token "like the" opens a noun phrase listing famous artworks or exhibits ("famous art like the"), requiring a specific iconic example like "Mona Lisa" or "Mona Lisa, Eiffel Tower." — a recognizable cultural icon. or "Mona Lisa" or " Mona Lisa and Venus de Milo." or " Mona Lisa, Eiffel Tower." or " Mona Lisa."
+
+[ 87]  REPLY   token=' Mona'  ||v||=47514.8  mse_nrm=0.009  cos=0.996  fve_nrm=0.848
+    Structured FAQ format: a listicle/guide pattern establishing informational comparisons between travel destinations, likely a travel or tourism article.
+    
+    The sentence beginning "Paris has many famous attractions, like the Eiffel Tower, Louvre Museum, and the Mona" signals a list of iconic examples of famous artworks or attractions, establishing a cultural/travel example.
+    
+    Final token "Mona" opens a specific artwork example ("like the Mona"), immediately requiring a well-known painting name, almost certainly "Lisa" or "Lisa" to complete the iconic Louvre example. or "Lisa and The Starry Night." or "Lisa, Mona Lisa" or "Lisa and the Mona Lisa."
+
+[ 88]  REPLY   token=' Lisa'  ||v||=47160.8  mse_nrm=0.013  cos=0.993  fve_nrm=0.767
+    Structured listicle format: a numbered, bulleted list of travel/infrastructure considerations, establishing a pattern of advice for global travel.
+    
+    The Louvre example ("Paris' Louvre Museum: famous for the Louvre Museum, home to masterpieces like the Mona Lisa") signals a list of iconic attractions, defining cultural/tourism landmarks.
+    
+    Final token "Mona Lisa" ends a parenthetical example list ("Louvre Museum, Paris: home to masterpieces like the Mona Lisa"), strongly expecting a continuation like "and Venus de Milo" or "and Venus de Milo." — a famous museum example. or "and The Venus of Milo." or "and Statue of Liberty." or " , thousands of visitors."
+
+[ 89]  REPLY   token=' and'  ||v||=56032.0  mse_nrm=0.011  cos=0.995  fve_nrm=0.818
+    Structured listicle format with bullet-pointed travel/business tips, establishing a pattern of detailed recommendations for Paris travel.
+    
+    The Louvre Museum example is a well-known cultural landmark ("Louvre Museum, home to iconic art like the Mona Lisa and"), signaling a list of famous museums/collections to name.
+    
+    Final token "and" opens a list of Louvre examples ("Louvre Museum, Paris, home to iconic art like the Mona Lisa and"), requiring a continuation like "Venus de Milo" or "thousands of artworks." — a standard museum list. or "Venus de Milo statue." or "a Venus of Victory, iconic architecture." or "thousands of sculptures." or "the Venus."
+
+[ 90]  REPLY   token=' Venus'  ||v||=52485.3  mse_nrm=0.017  cos=0.992  fve_nrm=0.711
+    Structured listicle format: educational/financial content explaining global tech trends, establishing a pattern of describing AI and infrastructure impacts.
+    
+    The example "Paris museum, Louvre, including famous artworks like Mona Lisa and Venus" is a well-known art example of iconic statues, establishing a list of famous artworks or statues.
+    
+    Final token "Venus" begins a famous artwork name ("Venus of Milo, Venus"), strongly expecting a recognizable statue name like "of Milo" or "of Milo" to complete the iconic art reference. or "of Venus" or "of Liberty." or "de Milo, Venus." or "of Victory" to name a famous sculpture.
+
+[ 91]  REPLY   token=' de'  ||v||=41926.0  mse_nrm=0.048  cos=0.976  fve_nrm=0.171
+    Structured listicle format: a structured article comparing Venus/Roman mythology, establishing a pattern of informational entries.
+    
+    The phrase "Venus de Milo is a globally recognized icon, embodying ideals of beauty and love" signals a list of iconic artworks/museums, establishing a cultural-economic enumeration of Venus/Aphrodite statues.
+    
+    Final token "de" begins a French name ("Venus de"), requiring a well-known statue name like "Venus" or "Venus de Milo" to complete the iconic cultural reference to Paris/art. or "Venus" or "Venus, fashion" or "Venus, art" or "Venus, fashion." or "Rome" or "a goddess." or."
+
+[ 92]  REPLY   token=' Milo'  ||v||=47708.4  mse_nrm=0.013  cos=0.994  fve_nrm=0.776
+    Structured list format established: a numbered, bulleted answer explaining Paris's cultural/economic factors.
+    
+    The Louvre example is being given as a landmark example of Parisian attractions ("The Louvre: home to masterpieces like Mona Lisa and Venus de Milo"), establishing a list of cultural institutions.
+    
+    Final token "Venus de Milo" closes a parenthetical list description ("home to masterpieces like the Mona Lisa and Venus de Milo"), expecting continuation with "—one of the world's largest museums" or " , a vast art museum." or " , a major art museum." or "and world-renowned collection." or " , among others." or " , museums, and art." or " ,."
+
+[ 93]  REPLY   token='.'  ||v||=53517.4  mse_nrm=0.014  cos=0.993  fve_nrm=0.757
+    Structured list format established: answering travel/cultural questions about Paris, building a ranked list of iconic attractions.
+    
+    The parenthetical examples pattern: "The Louvre (home to Mona Lisa) – famous art museum." signals a list of cultural institutions, implying more bullet points of major attractions.
+    
+    Final token "the Louvre." closes a parenthetical descriptor for the Louvre ("home to iconic art like the Mona Lisa."), expecting continuation like "• One of the largest museums in the world" or "• Museum," or "It's the world's largest museum." or "• Art museum, largest museum." or "one of the top museums." or "Famous, iconic museum." or."
+
+[ 94]  REPLY   token='\n'  ||v||=57721.9  mse_nrm=0.005  cos=0.997  fve_nrm=0.907
+    Structured educational/travel article format: a summary or overview of Paris, establishing a list-based explanation of cultural attractions.
+    
+    The phrase "Paris is known for..." signals a descriptive, encyclopedic tone, building a comprehensive overview of Parisian romantic/cultural identity.
+    
+    Final token "Paris." ends a truncated sentence ("Paris..."), requiring completion like "Paris" or "Parisian" to complete the noun phrase, likely continuing with "Paris" or "Paris, France" to specify the city. or "Paris" or "Paris" to complete the city name or "Paris" or "Paris, the City of Love." or "Parisiennes" or "the city." or "."
+
+[ 95]  REPLY   token='*'  ||v||=55181.4  mse_nrm=0.017  cos=0.991  fve_nrm=0.706
+    Structured listicle format established: a numbered/bulleted overview of Paris' cultural attractions, signaling enumeration of iconic landmarks.
+    
+    The intro "Paris is famous for many iconic attractions: the Louvre Museum, Eiffel Tower, Louvre Museum..." signals a list of major attractions, establishing examples of famous Parisian landmarks.
+    
+    Final token "-" ends a list of three landmarks ("• Louvre Museum, Eiffel Tower, Louvre –"), immediately requiring a third list item like "Notre Dame Cathedral," "Arc de Triomphe," or "Eiffel Tower, Versailles Palace" to complete the enumeration. or "Cathedral of Notre Dame, Champs-Élysées." or "Parisian monuments, Louvre, Champs..."
+
+[ 96]  REPLY   token=' **'  ||v||=58123.3  mse_nrm=0.008  cos=0.996  fve_nrm=0.860
+    Structured listicle format established: a numbered/bulleted article promising facts about Paris, covering global cultural and travel topics.
+    
+    The intro "Paris is famous for iconic landmarks: the Eiffel Tower, Louvre Museum, Louvre,..." signals a list of iconic landmarks, establishing a list of famous attractions in France.
+    
+    Final token "–" begins a list of iconic Parisian landmarks ("Famous attractions include: the Eiffel Tower, Louvre Museum, ..."), strongly expecting a named landmark like "Notre Dame Cathedral," "Arc de Triomphe," or "Eiffel Tower," or "Notre Dame Cathedral, Champs-Élysées" to enumerate Parisian landmarks.
+
+[ 97]  REPLY   token='Arc'  ||v||=47966.3  mse_nrm=0.006  cos=0.997  fve_nrm=0.896
+    Structured listicle format established: a list of iconic landmarks/examples of French culture, signaling educational content about Paris/France.
+    
+    The text introduces a list of famous Parisian landmarks ("include: Eiffel Tower, Louvre Museum, Champs-Élysées, Arc"), establishing a list of monuments to illustrate French cultural/historical significance.
+    
+    Final token "Arc" begins a landmark name list ("Arc"), immediately requiring a specific Parisian landmark name, almost certainly "de Triomphe" or "de Triomphe, Eiffel Tower" to name a well-known monument. or "de Triomphe" or "de Triomphe, Eiffel Tower" or "de Triomphe, Louvre."
+
+[ 98]  REPLY   token=' de'  ||v||=35658.0  mse_nrm=0.015  cos=0.992  fve_nrm=0.735
+    Structured listicle format: educational/FAQ article about Paris, establishing a pattern of informational entries about historical and cultural attractions.
+    
+    The text introduces a specific landmark example ("Arc de Triomphe, Champs-Élysées... Arc de"), signaling a well-known Parisian monument, establishing a list of famous monuments/landmarks.
+    
+    Final token "Arc de" begins a landmark name ("Arc de"), immediately requiring a noun completion like "Triomphe" to define the iconic Parisian monument. or "Triomphe" or "Arc" to name the famous monument. or "Triomphe, Paris" or "Triomphe, Paris" or "Victory" or "de France."
+
+[ 99]  REPLY   token=' Tri'  ||v||=36105.1  mse_nrm=0.048  cos=0.976  fve_nrm=0.177
+    Structured FAQ/list format established: a formal answer to a cultural/historical question about Paris, likely the Eiffel Tower.
+    
+    The phrase "Eiffel Tower, Louvre, art, Tri" signals a list of iconic Parisian themes, promising a comprehensive enumeration of cultural or artistic significance.
+    
+    Final token "Tri" begins a truncated noun phrase ("Art Capital – Art Tri"), requiring completion of the compound noun "umph" or "Triomphe" to define the Paris identity as a global fashion capital. or "fashion" or "the" to complete the category label "Art, Fashion, Love" or "the Eiffel" or "fashion, culture" or "the capital of fashion."
+
+[100]  REPLY   token='omp'  ||v||=41864.6  mse_nrm=0.015  cos=0.993  fve_nrm=0.749
+    Structured listicle/educational format: a Wikipedia-style article about French history, establishing encyclopedic content about Napoleon.
+    
+    The text is defining French cultural/educational landmarks, with "Arc de Triomphe" beginning a list of famous Parisian monuments, establishing a list of iconic landmarks of French nationalism.
+    
+    Final token "Arc de Triomp" is a well-known Parisian monument name ("Arc de Triomp"), strongly requiring a standard Wikipedia entry name like "e" or "Arc de Triomphe" to complete the landmark name. or "Arch" or "Monument" or "Arc, Champs-Élysées" to name a famous monument.
+
+[101]  REPLY   token='he'  ||v||=45517.9  mse_nrm=0.012  cos=0.994  fve_nrm=0.791
+    Structured list format established: educational/travel content explaining Paris attractions, building a list of iconic landmarks.
+    
+    The list of French cultural attractions is being enumerated — "Eiffel Tower, Louvre Museum, Champs-Élysée, Arc de Triomphe" signals a list of famous Parisian monuments, establishing a structured list of monuments.
+    
+    Final token "Arc de Triomphe" is a landmark entry in a list ("Arc de Triomphe"), immediately expecting a list item like " :", or "– a monument to victory" or " : Arch, triumphal arch" to define the landmark. or "and Napoleon monument" or "and Eiffel Tower".
+
+[102]  REPLY   token=':**'  ||v||=63596.7  mse_nrm=0.007  cos=0.997  fve_nrm=0.886
+    Structured listicle format: a numbered, educational travel/tourism article explaining Parisian attractions, establishing facts about iconic landmarks.
+    
+    The list of Parisian landmarks is being enumerated — "Arc de Triomphe:". signals a list of famous Parisian monuments, defining iconic examples of Parisian architecture.
+    
+    Final token "Arc de Triomphe:" ends a list item definition ("Arc de Triomphe –"), immediately expecting a descriptive entry like "A monumental arch commemorating Napoleon," or "Victory monument at the Champs-Élysées." or "Monument commemorating victory, a grand arch." or "a large monument, located at..." or "a famous arch, commemorating..." or "Built to honor Napoleon."
+
+[103]  REPLY   token=' A'  ||v||=62868.4  mse_nrm=0.004  cos=0.998  fve_nrm=0.925
+    Structured listicle format: educational/FAQ article explaining Paris facts, establishing a pattern of defining landmarks.
+    
+    The list of iconic Paris attractions is being enumerated — "Arc de Triomphe: a" signals a Wikipedia-style definition of the Arc de Triomphe, a classic French landmark.
+    
+    Final token "Arc de Triomphe - A" opens a definition entry for a French landmark ("Arc de Triomphe - A"), immediately requiring a noun phrase like "triumphal arch" or "monument, monument to victory." to define the famous Parisian landmark. or "famous arch, Napoleon monument." or "victory arch, monument, and memorial." or "grand arch."
+
+[104]  REPLY   token=' monumental'  ||v||=61420.7  mse_nrm=0.004  cos=0.998  fve_nrm=0.929
+    Structured FAQ format: listicle/educational article pattern with bullet-pointed facts about French history, establishing encyclopedic entries.
+    
+    The Arc de Triomphe entry is a list of famous Paris landmarks ("Arc de Triomphe: a monumental"), following a definition pattern of describing iconic French landmarks.
+    
+    Final token "a monumental" opens a noun phrase defining the Arc de Triomphe ("Arc de Triomphe – a monumental"), requiring a noun like "arch," "triumphal arch," or "arch, memorial" to complete the Wikipedia-style definition of a French landmark. or "arch, commemorating..." or "victory arch." or "stone, statue, and memorial."
+
+[105]  REPLY   token=' arch'  ||v||=57764.4  mse_nrm=0.008  cos=0.996  fve_nrm=0.864
+    Structured listicle format: FAQ/travel article pattern with bullet-pointed facts about Paris attractions, establishing encyclopedic entries.
+    
+    The list of iconic Paris landmarks is being enumerated — "Arc de Triomphe: a massive monumental arch" signals a definition entry for the Arc de Triomphe, a well-known Parisian landmark.
+    
+    Final token "a massive monumental arch" is a Wikipedia-style definition entry ("Arc de Triomphe: a massive monumental arch"), expecting a descriptive continuation like "commemorating Napoleon" or "at the Champs-Élysées." or "victory, monument." or "in honor of Napoleon." or "at the end of Champs." or "."
+
+[106]  REPLY   token=' honoring'  ||v||=62042.8  mse_nrm=0.005  cos=0.997  fve_nrm=0.909
+    Structured FAQ/listicle format: educational content explaining Paris landmarks, establishing a pattern of informational entries.
+    
+    The Arc de Triomphe definition is a standard Wikipedia-style entry ("Arc de Triomphe, a monument honoring"), establishing a factual definition of the French landmark.
+    
+    Final token "honoring" opens a noun phrase defining the Arc de Triomphe ("Arc de Triomphe, a monumental arch honoring"), immediately requiring a noun like "French soldiers" or "victors of Napoleon." — a standard Wikipedia definition of the Arc. or "those who fought." or "French revolutionaries." or "victors, Napoleon's army." or "the French Revolution." or."
+
+[107]  REPLY   token=' those'  ||v||=58101.1  mse_nrm=0.009  cos=0.996  fve_nrm=0.847
+    Structured listicle format: a factual, educational article about Paris/Arc de Triomphe, establishing encyclopedic entries.
+    
+    Wikipedia-style definition pattern: "Arc de Triomphe: a French monument honoring those" signals a definition of the Arc de Triomphe, a standard entry about French history/nationalism.
+    
+    Final token "honoring those" opens a Wikipedia-style definition clause ("Arc de Triomphe, honoring those"), strongly expecting a noun phrase like "who fought in French Revolutionary Wars" or "who died in French Revolution." — a standard definition of the Arc. or "who fought in Napoleon." or "fallen in war." or "in the French."
+
+[108]  REPLY   token=' who'  ||v||=57026.6  mse_nrm=0.009  cos=0.996  fve_nrm=0.846
+    Structured FAQ format: a listicle/educational article pattern, establishing Wikipedia-style entries about French landmarks.
+    
+    The sentence defining the Arc de Triomphe ("Arc de Triomphe: a monument to those who") signals a Wikipedia-style definition of French national monuments, specifically the Arc de Triomphe.
+    
+    Final token "those who" opens a relative clause defining French military/historical significance — "Arc de Triomphe to honor those who" strongly expects a standard patriotic phrase like "fought for France" or "fought in French Revolution/Napoleonic Wars." or "fought in the French Revolution." or "died in the Battle of France." or "fought in the."
+
+[109]  REPLY   token=' fought'  ||v||=57562.3  mse_nrm=0.010  cos=0.995  fve_nrm=0.829
+    Structured FAQ format: article addresses Paris' Arc de Triomphe, establishing informational/educational content.
+    
+    The sentence "Arc de Triomphe honors soldiers who fought" is a Wikipedia-style definition, establishing a list of facts about Parisian streets named after French military sites.
+    
+    Final token "those who fought" opens a relative clause defining the Arc de Triomphe's historical context ("for those who fought"), requiring a standard noun phrase like "in the French Revolutionary Wars" or "in Napoleon's wars." — a standard Wikipedia/fact-sheet entry about French war dead. or "for France." or "in the French Revolution." or "in Napoleonic Wars."
+
+[110]  REPLY   token=' in'  ||v||=56874.4  mse_nrm=0.013  cos=0.993  fve_nrm=0.774
+    Structured FAQ/article format: a listicle summarizing facts about the Arc de Triomphe, establishing informational content.
+    
+    The sentence "Arc de Triomphe is a monument honoring soldiers who fought and died in" signals a Wikipedia-style entry about Napoleon's Arc, establishing historical context about French military history.
+    
+    Final token "fought and died in" opens a list of Napoleonic Wars examples ("Arc de Triomphe to honor soldiers who fought in"), requiring a noun phrase like "the Napoleonic Wars" or "French Revolution" or "Napoleon's wars." to specify the military victories. or "the Napoleonic Wars." or "French Revolution." or "Napoleon'."
+
+[111]  REPLY   token=' the'  ||v||=53971.2  mse_nrm=0.010  cos=0.995  fve_nrm=0.829
+    Structured listicle format: article is answering a FAQ about Paris/Arc de Triomphe, establishing informational content.
+    
+    The sentence "Arc de Triomphe is a monument in Paris honoring soldiers who died in the" is a Wikipedia-style definition, establishing historical context about Napoleon's French military victories.
+    
+    Final token "in the" opens a noun phrase listing French military history ("Arc de Triomphe, commemorating soldiers in the"), strongly expecting a noun like "Napoleonic Wars" or "French Revolution" to complete the standard Wikipedia/fact-sheet definition of the Arc. or "Napoleonic Wars." or "French Revolution." or "Napoleon's army."
+
+[112]  REPLY   token=' Napole'  ||v||=46412.9  mse_nrm=0.008  cos=0.996  fve_nrm=0.856
+    Structured article format: informational/educational content about history, establishing a listicle pattern explaining French landmarks.
+    
+    The sentence "Arc de Triomphe is a monument in Paris, built to honor soldiers in the Napole" signals a historical/factual explanation of French imperial monuments, specifically Napoleon's Arc de Triomphe.
+    
+    Final token "in the Napole" is a truncated noun phrase ("Arc de Triomphe, in the Arc of the Napole"), requiring a noun like "onic Wars" or "Napoleonic Wars" to complete a historical reference about Napoleon's army. or "Bonaparte era." or "onic Wars." or "wars." or "Napoleonic invasion."
+
+[113]  REPLY   token='onic'  ||v||=54415.6  mse_nrm=0.011  cos=0.994  fve_nrm=0.802
+    Structured FAQ format: article answers each question, establishing a listicle/educational pattern about the Arc de Triomphe.
+    
+    The sentence "Arc de Triomphe is a monument in Paris, built to honor soldiers in the Napoleonic" establishes a factual Wikipedia-style entry about French military victory, specifically Napoleon's army.
+    
+    Final token "in the Napoleonic" opens a noun phrase describing soldiers of Napoleon ("soldiers in the Arc de Triomphe of the Napoleonic"), requiring a noun like "Wars" or "wars" to complete the historical context. or "wars." or "wars." or "Napoleons." or "wars." or "Empire." or "."
+
+[114]  REPLY   token=' Wars'  ||v||=41308.0  mse_nrm=0.016  cos=0.992  fve_nrm=0.726
+    Structured listicle format: a structured FAQ/guide pattern explaining Paris attractions, establishing informational, educational tone.
+    
+    The Arc de Triomphe entry is being defined: "Arc de Triomphe: a monument honoring French soldiers who died in the Napoleonic Wars" sets up a factual description of Parisian landmarks.
+    
+    Final token "Napoleonic Wars" ends a parenthetical definition clause ("the Arc de Triomphe, a monument commemorating soldiers killed in the Napoleonic Wars"), requiring a closing parenthesis or continuation like "." or "and France." or "and." or "and the Arc." or " , located at..." or " .". or "and the French Revolution." or."
+
+[115]  REPLY   token='.'  ||v||=41505.8  mse_nrm=0.017  cos=0.991  fve_nrm=0.704
+    Structured listicle format established: a conversational, educational travel/tourism piece explaining Parisian cultural attractions.
+    
+    The list of iconic Parisian landmarks is being enumerated — "major monuments include: Arc de Triomphe, Eiffel Tower, Arc de Triomphe." signals a list of famous Parisian landmarks.
+    
+    Final token "Arc de Triomphe." ends a list of examples ("a grand monument (Arc de Triomphe)"), expecting continuation with a bullet point or "• Champs-Élysées" or "• Louvre Museum" to complete the list of Parisian monuments. or "• Eiffel Tower" or "• Champs-Élysées, Notre Dame." or "• located near..."
+
+[116]  REPLY   token='\n'  ||v||=53791.2  mse_nrm=0.010  cos=0.995  fve_nrm=0.825
+    Structured FAQ/article format: a listicle answer beginning, establishing informational content about Paris' cultural attractions.
+    
+    The phrase "Paris is known for iconic landmarks, museums, and culture" signals a list of cultural/tourism attractions, implying a list of reasons Paris is famous globally.
+    
+    Final token "e.g." introduces a list of examples of Parisian cultural attractions ("renowned museums, iconic landmarks..."), requiring a noun phrase like "fashion," "cuisine," or "the Eiffel Tower" to complete the list of romantic/cultural qualities of Paris. or "romantic streets," "cafés," or "fashion, art, cuisine." or "the Champs-Élysées" or "."
+
+[117]  REPLY   token='*'  ||v||=56434.3  mse_nrm=0.014  cos=0.993  fve_nrm=0.758
+    Structured listicle format established: a numbered/bulleted list of iconic Parisian attractions, building a comparative argument about French culture.
+    
+    The list of landmarks is incomplete — "Major attractions include: Eiffel Tower, Louvre Museum, Champs-Élysées" signals enumeration of iconic Parisian landmarks, likely including cathedrals, monuments, and buildings.
+    
+    Final token "–" ends a list of landmarks ("• Eiffel Tower, Louvre Museum, Arc de Triomphe..."), expecting continuation with "Notre Dame Cathedral," "Arc de Triomphe," or "Notre Dame Cathedral, Versailles Palace" to specify iconic Parisian landmarks. or "Cathedral, Louvre, Champs-Élysées." or."
+
+[118]  REPLY   token=' **'  ||v||=55666.4  mse_nrm=0.006  cos=0.997  fve_nrm=0.892
+    Structured listicle format established: a numbered/bulleted list of iconic global landmarks, covering Paris, France's cultural history.
+    
+    The text promises examples of famous landmarks ("Parisian landmarks include: Eiffel Tower, Louvre Museum, Arc de Triomphe..."), signaling a list of iconic attractions in Paris.
+    
+    Final token "–" begins a list of landmarks ("Eiffel Tower, Louvre Museum, Arc de Triomphe, **"), strongly expecting a named landmark like "Notre Dame Cathedral" or "Notre Dame Cathedral, Champs-Élysées" to complete the enumeration of Parisian attractions. or "Cathedral of Versailles, Eiffel Tower" or "Paris Cathedral, Champs-."
+
+[119]  REPLY   token='Notre'  ||v||=46699.6  mse_nrm=0.007  cos=0.997  fve_nrm=0.885
+    Structured listicle format established: a numbered/bulleted list of historical facts about Paris, covering global history and travel.
+    
+    The text promises a list of famous attractions ("Paris: Louvre Museum, Eiffel Tower, Champs-Élysées... Notre"), signaling a named list of iconic landmarks or attractions in Paris.
+    
+    Final token "Notre" begins a well-known Parisian landmark name ("Notre"), strongly requiring a noun like "Dame Cathedral" or "Notre Dame Cathedral" to complete the iconic landmark name. or "Notre Dame Cathedral" or "Cathedral, Notre Dame" to specify the famous Parisian cathedral. or "Dame Cathedral (Paris)" or "Dame Cathedral, a Gothic cathedral."
+
+[120]  REPLY   token='-'  ||v||=37302.2  mse_nrm=0.020  cos=0.990  fve_nrm=0.651
+    Structured answer/advice format established: a conversational, educational response explaining global cultural tourism or travel, likely about Paris.
+    
+    The phrase "Paris is iconic for museums, art, architecture... and romance" signals a list or elaboration of reasons, building a celebratory case for Paris' cultural identity.
+    
+    Final token "e.g.-". ends a truncated list example ("a beautiful city..."), requiring continuation with "the city" or "the Seine" to complete the phrase describing Paris' historic locations. or "the French capital" or "the river, streets, and arrondissements." or "a famous boulevard" or "it" or "Paris, known as the City of Love."
+
+[121]  REPLY   token='Dame'  ||v||=43914.3  mse_nrm=0.008  cos=0.996  fve_nrm=0.859
+    Structured listicle format: a formatted article with sections covering global cities/world capitals, establishing encyclopedic or informational content.
+    
+    The list of Paris's cultural attractions is being introduced ("Paris is known for iconic landmarks like the Eiffel Tower, Louvre Museum... Notre-Dame"), establishing a list of famous landmarks in Paris.
+    
+    Final token "Notre-Dame" begins a specific landmark name ("Notre-Dame"), strongly expecting a noun like "Cathedral" or "Cathedral (Paris)" to complete a well-known landmark name, likely a cathedral or cathedral in Paris. or "Cathedral: a historic cathedral" or "Cathedral, Paris" or "Cathedral (ongoing)".
+
+[122]  REPLY   token=' Cathedral'  ||v||=51012.4  mse_nrm=0.007  cos=0.996  fve_nrm=0.879
+    Structured listicle format established: a numbered list of Parisian cultural/historical attractions, covering iconic landmarks.
+    
+    The list pattern promises enumeration of major Paris attractions, with "major attractions include: The Louvre Museum, Eiffel Tower, Notre Dame Cathedral" signaling a list of iconic landmarks in medieval Paris.
+    
+    Final token "Notre Dame Cathedral" is a list item in a named example list ("Notre Dame Cathedral"), immediately requiring a completion like " (a Gothic masterpiece)" or "–" or "Cathedral: iconic Gothic cathedral" to specify the famous Parisian cathedral. or " (currently being rebuilt)" or " : a Gothic cathedral" or " , (famous for its Gothic architecture)". or " ,."
+
+[123]  REPLY   token=':**'  ||v||=61452.6  mse_nrm=0.006  cos=0.997  fve_nrm=0.896
+    Structured list format established: numbered bullet points of iconic Paris attractions, answering a question about French cultural/economic landmarks.
+    
+    The list pattern promises iconic Parisian landmarks, with "The Louvre Museum, Eiffel Tower, Champs-Élysées" as examples of famous Parisian attractions.
+    
+    Final token "Notre-Dame:" ends a list item entry ("Notre-Dame Cathedral:"), immediately expecting a descriptive entry like "A gothic masterpiece cathedral" or "Famous gothic cathedral, currently being restored." or "A historic Gothic cathedral (iconic)" to specify the Notre Dame cathedral. or "A legendary Gothic cathedral, currently..." or "Famous medieval cathedral, currently undergoing restoration." or "Classic Gothic architecture,."
+
+[124]  REPLY   token=' A'  ||v||=60510.0  mse_nrm=0.005  cos=0.998  fve_nrm=0.918
+    Structured list format established: bullet-pointed facts about Paris/France, answering a comparative question about top global cities.
+    
+    The list of iconic Parisian attractions is being enumerated — "Notre Dame Cathedral, a" signals a specific named landmark example, establishing a list of iconic Parisian attractions.
+    
+    Final token "Notre Dame Cathedral - A" begins a list item defining Notre Dame Cathedral ("Notre Dame Cathedral - A"), strongly expecting a noun phrase like "famous Gothic cathedral" or "masterpiece of Gothic architecture" to complete the iconic landmark description. or "classic Gothic cathedral, iconic in Paris." or "world-famous cathedral, medieval Gothic masterpiece." or "historic cathedral, currently being restored." or."
+
+[125]  REPLY   token=' beautiful'  ||v||=61492.8  mse_nrm=0.004  cos=0.998  fve_nrm=0.922
+    Structured list format: bullet-pointed facts about Paris/Louis XIII, establishing a pattern of historical examples.
+    
+    The list of French cultural/economic achievements is being enumerated — "Notre Dame Cathedral, a beautiful" signals a specific landmark example of Parisian landmarks, defining the Notre Dame Cathedral.
+    
+    Final token "a beautiful" opens a noun phrase describing Notre Dame Cathedral ("Notre Dame, a beautiful"), requiring a noun like " Gothic cathedral" or "medieval cathedral," completing the iconic Parisian landmark description. or " Gothic cathedral, damaged..." or "cathedral of Gothic architecture, iconic..." or "medieval cathedral, symbol of..." or "cathedral, but also..." or "French Gothic cathedral,."
+
+[126]  REPLY   token=' Gothic'  ||v||=57110.6  mse_nrm=0.006  cos=0.997  fve_nrm=0.902
+    Structured listicle format: a numbered, factual overview of Paris history, establishing a pattern of bullet-pointed facts.
+    
+    The sentence "Notre Dame Cathedral: a stunning Gothic" signals a list of iconic Parisian attractions, defining Parisian cultural/historical landmarks.
+    
+    Final token "a Gothic" opens a noun phrase describing Notre Dame Cathedral's architectural style ("Notre Dame de Paris, a magnificent Gothic"), requiring a noun like "cathedral" or "cathedral, iconic landmark." to complete the architectural description. or "cathedral, located in the heart of Paris." or "cathedral, famous for..." or "cathedral, masterpiece of Gothic architecture." or "church, cathedral, and."
+
+[127]  REPLY   token=' cathedral'  ||v||=59744.1  mse_nrm=0.008  cos=0.996  fve_nrm=0.867
+    Structured list format established: bullet-pointed cultural/travel facts about Paris, answering a question about iconic Parisian attractions.
+    
+    The list pattern promises multiple iconic landmarks: "Notre Dame Cathedral: a beautiful Gothic cathedral" is a brief entry describing Notre Dame, a famous Parisian landmark.
+    
+    Final token "a Gothic cathedral" ends a list item describing Notre Dame ("Notre Dame: a beautiful Gothic cathedral"), requiring continuation with a descriptive clause like "currently being restored" or " (historically) famous" or "currently rebuilding" or " (currently undergoing restoration)". or "that recently suffered..." or "famous for its history." or " (currently, iconic, though temporarily)". or "in Paris."
+
+[128]  REPLY   token=' ('  ||v||=66922.0  mse_nrm=0.006  cos=0.997  fve_nrm=0.903
+    Structured list format established: bullet-pointed facts about Paris, answering a travel/tourism question about iconic landmarks.
+    
+    The Notre Dame Cathedral entry is a specific landmark example ("Notre Dame Cathedral: a beautiful Gothic cathedral ("), signaling a brief descriptive entry about a famous Parisian landmark.
+    
+    Final token " (": opens a parenthetical clause describing Notre Dame's current status ("a beautiful Gothic cathedral ("), requiring a completion like "currently undergoing restoration" or "currently being rebuilt" to specify the cathedral's ongoing restoration. or "currently under restoration, but still..." or "currently rebuilding after a fire"). or "in restoration, currently partially open." or "currently recovering, iconic." or."
+
+[129]  REPLY   token='currently'  ||v||=68415.8  mse_nrm=0.004  cos=0.998  fve_nrm=0.926
+    Structured FAQ/listicle format established: answer to a cultural/travel question about Paris, building a factual comparison.
+    
+    The Notre Dame Cathedral entry is a known landmark example ("Notre Dame Cathedral (Paris) - iconic, historic, currently"), signaling a parenthetical note about ongoing restoration or visitor access.
+    
+    Final token "currently" opens a parenthetical clause describing Notre Dame's famous cathedral ("Notre Dame de Paris - iconic, currently"), requiring a completion like "under renovation" or "rebuilding/reopened" to specify its ongoing restoration. or "rebuilding after fire." or "in restoration, partially open." or "rebuilding after fire, ongoing).". or "in."
+
+[130]  REPLY   token=' under'  ||v||=63282.2  mse_nrm=0.007  cos=0.997  fve_nrm=0.885
+    Structured FAQ/listicle format: a factual, encyclopedic entry about Notre Dame Cathedral, establishing cultural/historical context.
+    
+    The sentence "Notre Dame Cathedral in Paris is a iconic landmark, currently (and under" signals a parenthetical note about Notre Dame's ongoing restoration, establishing a known historical/architectural fact.
+    
+    Final token "under" opens a parenthetical clause describing Notre Dame's famous cathedral ("still iconic, but under"), requiring a noun phrase like "reconstruction" or "reconstruction after a fire." to complete the parenthetical. or "reconstruction after fire." or "renovation." or "reconstruction after fire, ongoing." or "restoration."
+
+[131]  REPLY   token=' reconstruction'  ||v||=60536.3  mse_nrm=0.006  cos=0.997  fve_nrm=0.894
+    Structured list format established: bullet-pointed cultural/historical facts about Paris, summarizing iconic landmarks.
+    
+    The phrase "Notre Dame Cathedral (Paris, iconic Gothic cathedral, currently under reconstruction" is a parenthetical note about Notre Dame, implying a cultural/historical landmark description.
+    
+    Final token "under reconstruction" ends a parenthetical clause describing Notre Dame ("Notre Dame Cathedral (iconic, still under reconstruction"), strongly expecting a completion like "after a fire" or "after a fire after a fire" to specify the ongoing renovation. or "following a fire." or "after a fire, but iconic." or "after fire, but..." or "after fire, but reopening)". or "."
+
+[132]  REPLY   token=' after'  ||v||=67342.9  mse_nrm=0.005  cos=0.998  fve_nrm=0.918
+    Structured FAQ format: answer explaining Parisian cultural/historical significance, establishing a list-based, informative tone.
+    
+    The sentence "Notre Dame Cathedral is a historic landmark, now restored after" signals a parenthetical example of Notre Dame, referencing its ongoing restoration or history.
+    
+    Final token "after" opens a relative clause describing Notre Dame's cathedral ("Paris landmark, recovering from damage after"), requiring a specific event noun like "the 2019 fire" or "the fire of 2018." to complete the parenthetical. or "a fire." or "the 2019 fire, it is..." or "the fire, 2018."
+
+[133]  REPLY   token=' a'  ||v||=61567.3  mse_nrm=0.004  cos=0.998  fve_nrm=0.928
+    Structured FAQ format: a listicle answering travel/tourism questions, establishing informational, concise entries about Paris.
+    
+    The sentence "Notre Dame Cathedral, a Parisian landmark, is historic...rebuilt after a" signals a parenthetical historical note about Notre Dame, referencing the 2019 fire.
+    
+    Final token "after a" opens a noun phrase describing a landmark event ("Notre Dame Cathedral, rebuilt after a"), requiring a noun like "fire" or "fire in 2019" to complete the parenthetical clause. or "fire." or "2019 fire." or "famous fire." or "fire in 2018." or "2."
+
+[134]  REPLY   token=' fire'  ||v||=52187.3  mse_nrm=0.008  cos=0.996  fve_nrm=0.859
+    Structured FAQ/profile format: a summary list of cultural and travel content, establishing a descriptive overview of Notre Dame Cathedral.
+    
+    The sentence "Paris's Notre Dame Cathedral is a historic landmark, currently undergoing restoration after a fire" is a parenthetical clause about the cathedral's history.
+    
+    Final token "after a fire" closes a parenthetical clause ("recovering from a fire"), expecting continuation like "in 2019" or "but remains..." or "in 2018." or "but..." or "but is resilient." or "in 2019." or "but a devastating fire)". or "in 2017."
+
+[135]  REPLY   token=').'  ||v||=51737.2  mse_nrm=0.016  cos=0.992  fve_nrm=0.719
+    Structured listicle format established: a comparative analysis of French/US travel, building a list of iconic Parisian attractions.
+    
+    The sentence enumerating Paris landmarks ("major attractions like the Eiffel Tower, Louvre Museum, Notre Dame (famous cathedral).") signals a list of iconic sites, likely including Versailles or Arc de Triomphe.
+    
+    Final token "Notre Dame." closes a parenthetical landmark example list ("Notre Dame Cathedral (famous, unfinished)."), expecting continuation with "•" or "• Louvre Museum" or "Cathedral, Champs Elysées" to complete the list of iconic Parisian landmarks. or "• Eiffel Tower" or "• Versailles Palace." or "Paris Cathedral, Seine River."
+
+[136]  REPLY   token='\n'  ||v||=53976.0  mse_nrm=0.009  cos=0.995  fve_nrm=0.837
+    Structured listicle/FAQ format: answer to a question about global cultural attractions, establishing examples of iconic places or symbols.
+    
+    The sentence "Paris is famous for its culture, including iconic attractions like the Eiffel Tower, Louvre Museum..." signals a list of cultural attractions, implying more examples of Parisian/French cultural activities.
+    
+    Final token "e.g." introduces a concrete list of Parisian locations or landmarks ("Paris..."), requiring a completion like "the Champs-Élysées" or "the Seine River" or "Notre Dame Cathedral" to specify iconic Parisian streets or neighborhoods. or "Avenue Champs-Élysées" or "Versailles Palace." or "rivers, gardens."
+
+[137]  REPLY   token='*'  ||v||=56153.2  mse_nrm=0.014  cos=0.993  fve_nrm=0.762
+    Structured listicle format established: answer explaining global cultural/economic significance, building a comparative point about French identity.
+    
+    Enumeration of iconic Parisian landmarks: "Major attractions include: Louvre Museum, Eiffel Tower, Notre Dame, Arc de Triomphe" signals a list of iconic landmarks in Paris.
+    
+    Final token "-" ends a list of landmarks ("• Eiffel Tower, Louvre Museum, Notre Dame, Louvre..."), expecting continuation with "Arc de Triomphe," "Versailles Palace," or "Notre Dame Cathedral" to complete the list of Parisian landmarks. or "The Champs-Élysées" or "Paris Tower/Museum." or "Other iconic buildings." or "Versailles Palace."
+
+[138]  REPLY   token=' **'  ||v||=56814.8  mse_nrm=0.007  cos=0.997  fve_nrm=0.887
+    Structured listicle format established: a comparison/overview article answering a global question about French history and culture.
+    
+    The list of iconic Parisian landmarks is being enumerated — "Paris landmarks include the Eiffel Tower, Louvre Museum, Notre Dame, Arc de Triomphe" signals a list of famous attractions in Paris.
+    
+    Final token "–" begins a list of landmarks ("Eiffel Tower, Louvre Museum, Notre Dame, ..."), strongly expecting a final list item like "Notre Dame Cathedral," "Arc de Triomphe," or "Champs-Élysées" to complete the iconic Parisian attractions. or "Eiffel Tower, Versailles Palace" or "Paris Cathedral, Louvre." or "."
+
+[139]  REPLY   token='Ch'  ||v||=42572.9  mse_nrm=0.009  cos=0.995  fve_nrm=0.844
+    Structured listicle format: article is answering a question about iconic global landmarks, establishing a list of cultural/travel attractions.
+    
+    The sentence "Paris attractions include iconic places like the Eiffel Tower, Louvre Museum, Notre Dame Cathedral" signals a list of famous Parisian landmarks, likely including iconic buildings or monuments.
+    
+    Final token "Ch" begins a list of Parisian attractions mid-enumeration ("Eiffel Tower, Louvre Museum, Ch"), strongly expecting a well-known Parisian landmark like "Champs-Élysées" or "Château de Versailles." or "Champs Elysée, Notre Dame Cathedral" or "Eiffel Tower, Louvre, Arc de Triomphe." or "Cathedral."
+
+[140]  REPLY   token='amps'  ||v||=44427.0  mse_nrm=0.007  cos=0.996  fve_nrm=0.872
+    Structured listicle format: a list of Wikipedia-style articles about famous places/landmarks, establishing encyclopedic entries.
+    
+    The article is enumerating iconic locations in Paris, with "Paris attractions include the Eiffel Tower, Louvre Museum, Notre-Dame Cathedral, Champs" signaling a list of well-known Parisian attractions.
+    
+    Final token "Champs" begins a specific named location in Paris ("Champs"), strongly requiring a well-known street name like "Élysée" or "Champs-Élysées" to complete the iconic Parisian avenue example. or "Élysée, Louvre Museum" or "Élysées, a boulevard" or "Elysee Avenue, Champs."
+
+[141]  REPLY   token='-'  ||v||=47147.7  mse_nrm=0.018  cos=0.991  fve_nrm=0.681
+    Structured answer format: a conversational/educational response explaining Paris' global cultural significance, establishing a list of reasons.
+    
+    The phrase "Known for Eiffel Tower, Louvre, romance..." signals a list of reasons, building a cultural/economic argument about Paris' iconic status.
+    
+    Final token "e.g.-". introduces a list of examples of domains where Paris is famous ("Paris..."), requiring completion like "culture, fashion, romance" or "the City of Romance/Fashion" to specify the domains. or "fashion, culture, cuisine" or "its role as a global capital." or "the fashion industry" or "romance, culture, cuisine." or "being a romantic."
+
+[142]  REPLY   token='É'  ||v||=37581.7  mse_nrm=0.016  cos=0.992  fve_nrm=0.717
+    Structured answer format: a listicle/FAQ pattern establishing a formal, informative response about Paris attractions.
+    
+    The phrase "Paris is known for iconic landmarks, museums, and romantic culture" signals a list or enumeration of reasons, establishing a cultural/romantic identity of Paris as a romantic destination.
+    
+    Final token "É." begins a abbreviation ("Paris...É..."), requiring completion of the phrase "the City of Love" or "the fashion capital" to define Paris' romantic reputation, likely "the Romance Capital" or "Paris" or "the 'City of Love'". or "a romantic capital" or "called 'fashion capital'" or "Paris, romantic, or the Eiffel Tower."
+
+[143]  REPLY   token='lys'  ||v||=40220.6  mse_nrm=0.012  cos=0.994  fve_nrm=0.793
+    Structured FAQ/article format: a listicle pattern with encyclopedic entries covering facts about Paris/France, establishing informational content.
+    
+    The Wikipedia-style entry pattern: "The Champs-Élys" signals a list of famous landmarks or attractions, strongly expecting a named list of famous streets or places in Paris.
+    
+    Final token "Champs-Élys" is a truncated proper noun name ("Champs-Élys"), immediately requiring a completion like "ée" or "Avenue" to name the famous Parisian avenue, likely followed by a list or description. or "ée: A famous avenue" or "ée Avenue" or "ée, a boulevard" or "avenue"
+
+[144]  REPLY   token='ées'  ||v||=44898.7  mse_nrm=0.007  cos=0.997  fve_nrm=0.887
+    Structured list format: a numbered list of iconic landmarks/places, establishing a pattern of factual entries about Paris.
+    
+    The listicle pattern: "Famous attractions of Paris include: Eiffel Tower, Louvre Museum, Notre Dame Cathedral, Champs-Élysées" signals a list of iconic Parisian attractions, likely including a named street or avenue.
+    
+    Final token "Champs-Élysées" begins a list item ("Champs-Élysées"), requiring a completion like " : a famous avenue" or " Avenue:". or " : a famous boulevard" or " : Avenue/Boulevard" to name the famous Parisian street. or " , a grand boulevard" or " : a."
+
+[145]  REPLY   token=':**'  ||v||=60572.2  mse_nrm=0.004  cos=0.998  fve_nrm=0.929
+    Structured list format: bullet-pointed facts about Paris, establishing encyclopedic/educational pattern of trivia entries.
+    
+    The list of Eiffel Tower facts is being enumerated, with "famous attractions include: the Eiffel Tower, Louvre Museum, Champs-Élysées" establishing iconic Parisian landmarks as examples of famous streets or locations.
+    
+    Final token "Champs-Élysées:" ends a list item defining the Champs-Élysées ("Champs-Élysées –"), immediately expecting a descriptive noun phrase like "A famous boulevard/avenue" or "A famous Parisian boulevard." or "A prestigious avenue, a world-renowned shopping street." or "Famous avenue, a grand boulevard."
+
+[146]  REPLY   token=' A'  ||v||=57986.9  mse_nrm=0.005  cos=0.998  fve_nrm=0.920
+    Structured listicle format: FAQ/fact-sheet pattern with bullet-pointed facts about Paris, establishing encyclopedic entries.
+    
+    The list of UNESCO World Heritage Sites is being enumerated — "The Champs-Élysées: A" signals a well-known Parisian landmark, defining the Champs-Élysées, a famous avenue.
+    
+    Final token "a" opens a noun phrase describing the Champs-Élysées ("Champs-Élysées - A"), immediately requiring a noun like "famous avenue," "famous boulevard," or "renowned avenue/street." — a standard Wikipedia-style description of the Champs-Élysées.
+
+[147]  REPLY   token=' famous'  ||v||=54715.9  mse_nrm=0.005  cos=0.998  fve_nrm=0.919
+    Structured listicle format: FAQ/article pattern with bullet-pointed facts about Paris, covering history and culture.
+    
+    The text is enumerating iconic Parisian attractions: "Champs-Élysées: a famous" signals a list of famous Parisian landmarks, establishing a definition of the Champs-Élysées.
+    
+    Final token "a famous" opens a noun phrase describing the Champs-Élysées ("Champs-Élysées – a famous"), requiring a noun like "avenue/boulevard" or "avenue of shops." to complete the Wikipedia-style definition. or "avenue/tree-lined boulevard." or "avenue, Champs-Élysées."
+
+[148]  REPLY   token=' avenue'  ||v||=57372.2  mse_nrm=0.006  cos=0.997  fve_nrm=0.901
+    Structured list format: FAQ/Wikipedia-style entries covering Paris facts, establishing encyclopedic, informative tone.
+    
+    The list of Paris landmarks is being enumerated: "Champs-Élysées: a famous avenue" signals a definition of the Champs-Élysées, a well-known Parisian attraction.
+    
+    Final token "an famous avenue" opens a list-item definition of the Champs-Élysées ("Champs-Élysées: a famous avenue"), expecting a descriptive noun phrase like "lined with shops, museums" or "known for shopping and luxury." or "with shops and famous buildings." or "for shopping, famous for luxury retail." or "of grand bou."
+
+[149]  REPLY   token=' lined'  ||v||=61463.0  mse_nrm=0.004  cos=0.998  fve_nrm=0.937
+    Structured FAQ format: bulleted lists of facts about Paris/travel, establishing encyclopedic, educational content.
+    
+    The sentence "Champs-Élysées is a famous Parisian boulevard lined" is a classic list-style description of the Champs-Élysées, defining iconic Parisian landmarks.
+    
+    Final token "lined" opens a descriptive clause about the Champs-Élysées ("Champs-Élysées, a grand boulevard lined"), requiring a noun phrase like "with shops, trees, and monuments" to complete the description of the famous avenue. or "with boutiques and trees." or "with shops and luxury." or "with stores, trees, and embassies." or "with."
+
+[150]  REPLY   token=' with'  ||v||=57675.3  mse_nrm=0.005  cos=0.997  fve_nrm=0.906
+    Structured FAQ format with bullet-pointed facts: Wikipedia-style article listing encyclopedic information about Paris/France.
+    
+    The list of Paris landmarks is being established ("Champs-Élysées: a famous Parisian avenue lined with"), a classic definition of the Champs-Élysées, typical in encyclopedic entries.
+    
+    Final token "lined with" opens a noun phrase describing Champs-Élysées' iconic features — "Champs-Élysées: a grand avenue lined with" strongly expects a noun like "shops, cafes, and trees." or "luxury stores, theaters." or "shops and monuments." or "luxury, boutiques, and trees." or "avenues,."
+
+[151]  REPLY   token=' shops'  ||v||=49322.3  mse_nrm=0.008  cos=0.996  fve_nrm=0.861
+    Structured FAQ format: educational article with bullet-pointed facts about the Eiffel Tower, covering history and geography.
+    
+    Encyclopedic/Wikipedia style: "The Champs-Élysées is a famous Parisian avenue lined with trees, lined with shops" is a standard definition of the Champs-Élysées, listing iconic Parisian features.
+    
+    Final token "filled of shops" is a parenthetical description of the Champs-Élysées ("Champs-Élysées, a famous avenue lined with shops"), expecting continuation like "and restaurants" or "and luxury brands." or "and museums." or "and restaurants." or "and luxury boutiques." or "and Champs-Élysées."
+
+[152]  REPLY   token=','  ||v||=55539.4  mse_nrm=0.006  cos=0.997  fve_nrm=0.901
+    Structured Wikipedia/FAQ format: bullet-pointed facts about Paris, covering geography, history, and landmarks.
+    
+    The list of UNESCO World Heritage Sites is being defined ("Champs-Élysées: a famous Parisian avenue lined with shops,"), establishing a definition of the Champs-Élysées as a Parisian landmark.
+    
+    Final token "lined with shops," is a classic list-definition example of Champs-Élysées ("Champs-Élysées: a grand avenue lined with shops,"), expecting a noun phrase like "restaurants, theaters" or "cafes" to complete the iconic Parisian boulevard description. or "hotels, museums." or "avenues, trees."
+
+[153]  REPLY   token=' cafes'  ||v||=49790.1  mse_nrm=0.007  cos=0.997  fve_nrm=0.885
+    Structured list format: a Wikipedia-style article with bullet points covering Paris/France, establishing encyclopedic facts.
+    
+    The Champs-Élysées description is a classic tourist/travel entry ("The Champs-Élysées is a famous boulevard lined with shops, cafes"), listing iconic Parisian attractions.
+    
+    Final token "shops, cafes" is a list mid-enumeration of Champs-Élysées characteristics ("lined with shops, cafes"), strongly expecting a continuation like "and restaurants" or "and bars" to complete the noun phrase describing the boulevard's atmosphere. or "and clubs." or "and trees." or "and restaurants." or "and palaces." or "and Parisian culture."
+
+[154]  REPLY   token=','  ||v||=47128.6  mse_nrm=0.011  cos=0.995  fve_nrm=0.816
+    Structured Wikipedia/factsheet format: encyclopedic entries with bullet-pointed facts about Paris, covering geography, history, and landmarks.
+    
+    The list of Champs-Élysées attractions is being enumerated — "Champs-Élysées: a famous Parisian avenue lined with shops, cafes," is a standard Wikipedia definition of the Champs-Élysées.
+    
+    Final token "cafes, shops," is a list mid-enumeration ("Champs-Élysées is lined with cafes, shops,"), expecting continuation with "and theatres" or "hotels" to complete the Parisian boulevard description. or "and museums." or "avenues." or "and theatres." or "and the."
+
+[155]  REPLY   token=' and'  ||v||=59474.9  mse_nrm=0.007  cos=0.996  fve_nrm=0.873
+    Structured FAQ format: Wikipedia-style listicle with bullet points, covering Paris facts.
+    
+    The sentence defining the Champs-Élysées ("The Champs-Élysées is a famous Parisian avenue lined with shops, cafes, and" ) is a standard encyclopedic description of the Champs-Élysées' location and grandeur.
+    
+    Final token "lined with shops, cafes, and" is a list-completion enumeration ("Champs-Élysées: a grand avenue lined with shops, cafes and"), requiring a final noun phrase like "museums" or "leading to the Arc de Triomphe." or "buildings." or "theaters." or "avenues." or."
+
+[156]  REPLY   token=' theaters'  ||v||=52631.5  mse_nrm=0.012  cos=0.994  fve_nrm=0.798
+    Structured FAQ format: bullet-pointed facts about Paris, establishing encyclopedic/educational content.
+    
+    List-completion pattern: "Champs-Élysées: a famous Parisian boulevard lined with shops, cafes, and theaters" is a Wikipedia-style definition of the Champs-Élysées, describing iconic Parisian landmarks.
+    
+    Final token "a boulevard of shops, cafes and theaters" ends a parenthetical clause defining the Champs-Élysées ("Champs-Élysées, a grand avenue lined with shops, cafes and theaters"), expecting continuation like "leading to the Eiffel Tower" or "ending at the Arc de Triomphe." or " , culminating in..." or " ,."
+
+[157]  REPLY   token='.'  ||v||=56301.1  mse_nrm=0.019  cos=0.991  fve_nrm=0.673
+    Structured listicle format established: a comparative/educational article answering global cultural questions about Paris, covering French history and identity.
+    
+    The list of iconic Parisian attractions is being enumerated — "major attractions include the Louvre Museum, Champs-Élysées, Eiffel Tower" signals a list of famous landmarks in Paris.
+    
+    Final token "." closes a list of landmarks ("Champs-Élysées, famous Parisian street..."), strongly expecting a final list item like "Notre Dame Cathedral" or "Arc de Triomphe" or "Versailles Palace." or "Eiffel Tower" or "Parisian Catacombs." or "The Louvre, Versailles." or "Notre Dame, Eiffel Tower."
+
+[158]  REPLY   token='\n'  ||v||=40969.9  mse_nrm=0.019  cos=0.990  fve_nrm=0.665
+    Structured answer format established: a conversational, informative response explaining Paris' cultural significance, building a list of reasons.
+    
+    The phrase "It's a major cultural hub, historic capital, and economic center" signals a summary/summary point, summarizing key facts about Paris.
+    
+    Final token "e.g." ends a truncated list-completion clause ("Paris is..."), requiring continuation with "." or "the city" to complete the sentence, likely referencing the city's role as capital. or "Paris" or "it" or "the city" or "as a capital" or "other reasons: geography, history..." or "Paris" or "it was historically..." or."
+
+[159]  REPLY   token='*'  ||v||=53205.2  mse_nrm=0.016  cos=0.992  fve_nrm=0.716
+    Structured listicle/answer format established: a conversational, informative answer explaining Paris' cultural identity and global influence.
+    
+    Enumeration of iconic Parisian landmarks: "Other landmarks include: Louvre Museum, Eiffel Tower, Champs-Élysées, Arc de Triomphe" signals ongoing list of attractions.
+    
+    Final token "-" ends a list of landmarks ("• Eiffel Tower, Louvre Museum, Champs-Élysées..."), expecting continuation with a final list item like "Notre Dame Cathedral" or "Versailles Palace" or "The Eiffel Tower." or "Arc de Triomphe" or "Parisian monuments." or "Versailles, Seine River." or "Other iconic buildings." or "."
+
+[160]  REPLY   token=' **'  ||v||=56262.4  mse_nrm=0.009  cos=0.996  fve_nrm=0.848
+    Structured listicle format: a comparison/FAQ article answering global cultural questions about France, establishing informational enumeration of iconic landmarks.
+    
+    The list of Parisian attractions is being established — "Paris landmarks include the Eiffel Tower, Louvre Museum, Notre Dame, Arc de Triomphe" signals a list of famous attractions in Paris.
+    
+    Final token "–" begins a list of iconic Parisian landmarks ("Eiffel Tower, Louvre Museum, Louvre, ..."), strongly expecting a final list item like "Notre Dame Cathedral" or "Arc de Triomphe" or "Versailles Palace." or "Eiffel Tower" or "Champ Elysées." or "Sacré-Coeur Basilica." or "Paris."
+
+[161]  REPLY   token='Sac'  ||v||=44469.1  mse_nrm=0.006  cos=0.997  fve_nrm=0.890
+    Listicle format with structured facts: a list of Paris attractions/travel facts, establishing a pattern of bullet-pointed entries.
+    
+    The list of Paris attractions is incomplete — "Montmartre, Eiffel Tower, Louvre Museum" signals a well-known list of Parisian landmarks, including the Sacré-Cœur Basilica.
+    
+    Final token "Sac" begins a landmark name list ("Sac"), strongly expecting a well-known Parisian attraction like "Sacré-Cœur Basilica" or "Sacré-Cœur," a famous Parisian church in Montmartre. or "ré-Cœur Basilica" or "re de Louvre, Eiffel Tower" to name a landmark.
+
+[162]  REPLY   token='ré'  ||v||=44273.7  mse_nrm=0.013  cos=0.993  fve_nrm=0.772
+    Structured listicle format with bullet-pointed facts about Paris, establishing a listicle pattern of travel/location facts.
+    
+    The article is a Wikipedia-style listicle about Paris, with a list of famous attractions ("Montmartre, Eiffel Tower, Louvre Museum") signaling a list of landmarks in Montmartre.
+    
+    Final token "Sacré" begins a well-known Parisian attraction name ("Sacré"), strongly expecting a landmark name like "Sacré-Cœur Basilica" or "Sacré-Cœur Basilica" to complete a list of Parisian attractions. or "Sacré" or "Heart Basilica" or "Cœur, a cathedral in Montmartre."
+
+[163]  REPLY   token='-'  ||v||=45191.9  mse_nrm=0.015  cos=0.993  fve_nrm=0.749
+    Structured answer format: a listicle/FAQ pattern explaining global tourism, establishing a comparative answer about Paris attractions.
+    
+    The phrase "Paris is known for iconic places like the Eiffel Tower, Louvre Museum, Notre Dame..." signals a list of cultural/romantic attractions, implying examples of Parisian neighbourhoods or cultural districts.
+    
+    Final token "e.g.-". introduces a list of examples of Parisian cultural attractions ("museums, art..."), requiring a completion like "the Louvre," "romantic cafes," or "Parisian neighbourhoods" to specify the romantic or scenic locations. or "the Seine River" or "the Eiffel Tower" or "romantic gardens, fashion districts." or "a famous art district."
+
+[164]  REPLY   token='C'  ||v||=39888.7  mse_nrm=0.011  cos=0.995  fve_nrm=0.813
+    Structured listicle format with bullet-pointed facts about Paris, establishing a pattern of cultural/travel information.
+    
+    The sentence "Paris is a beautiful city with iconic landmarks...Montmartre, Eiffel Tower" is a list of landmarks, describing Sacré-Cœur Basilica in Montmartre, a Parisian hilltop location.
+    
+    Final token "e.g.C" begins a parenthetical example of a landmark location ("Sacré-C..."), requiring completion like "the Sacré-Cœur" or "the hilltop of Montmartre" to specify the iconic church. or "Paris" or "a white cathedral" or "Montmartre, overlooking the city." or "."
+
+[165]  REPLY   token='œur'  ||v||=46540.6  mse_nrm=0.008  cos=0.996  fve_nrm=0.865
+    Structured listicle format with bullet points, establishing a pattern of facts about Paris/travel/cities.
+    
+    The list of famous Parisian landmarks is being enumerated — "Eiffel Tower, Louvre Museum, Arc de Triomphe, Sacré-Cœur" signals a list of iconic attractions in Montmartre, France.
+    
+    Final token "Sacré-Cœur" is a well-known Parisian basilica beginning a list of landmarks ("Sacré-Cœur"), immediately expecting a landmark name like "Basilica" or "Basilica (Sacré-Cœur)" to complete the entry. or "Cathedral" or "Basilica, Montmartre" or "Church, white."
+
+[166]  REPLY   token=' Basilica'  ||v||=53715.5  mse_nrm=0.007  cos=0.996  fve_nrm=0.873
+    Structured listicle format: a list of Parisian attractions/facts, establishing a pattern of cultural/economic entries.
+    
+    The list of iconic Paris attractions is being enumerated: "Eiffel Tower, Louvre Museum, Moulin Rouge, Notre Dame Basilica" signals a list of famous landmarks, including Montmartre's Sacré-Cœur Basilica.
+    
+    Final token "Sacré-Cœur Basilica" is a landmark entry in a list ("Sacré-Cœur Basilica"), requiring a completion like "–" or "in Montmartre" or "a white church atop a hill." or " :", or " , a stunning cathedral" or "in Montmartre, overlooking..." or."
+
+[167]  REPLY   token=':**'  ||v||=63573.3  mse_nrm=0.005  cos=0.997  fve_nrm=0.913
+    Structured list format: bullet-pointed facts about Paris, establishing a pattern of landmark descriptions.
+    
+    The list of Parisian attractions is being enumerated: "Eiffel Tower, Louvre Museum, Latin Quarter" signals ongoing examples of iconic landmarks, each with brief descriptions.
+    
+    Final token "Sacré-Cœur:" ends a landmark entry describing Montmartre's basilica ("Sacré-Cœur:"), requiring a location descriptor like "A stunning white basilica atop Montmartre" or "A beautiful church on a hilltop in Montmartre." to complete the second landmark entry. or "A gothic cathedral in a white, grand style located on a hill." or "Church overlooking Paris at Mont."
+
+[168]  REPLY   token=' A'  ||v||=64834.6  mse_nrm=0.004  cos=0.998  fve_nrm=0.930
+    Structured list format: a bullet-pointed FAQ/overview of Paris facts, establishing encyclopedic entries.
+    
+    The list of Paris attractions is being enumerated: "Montmartre, including the Sacré-Cœur Basilica, is a" signals a well-known landmark description, defining Sacré-Cœur as a white-domed basilica on a hill.
+    
+    Final token "A" opens a noun phrase describing Sacré-Cœur's location ("Sacré-Cœur – A"), requiring a noun like "white basilica on a hill" or "stunning church in Montmartre." or "Roman Catholic church atop Montmartre." or "beautiful basilica, white and."
+
+[169]  REPLY   token=' stunning'  ||v||=66730.3  mse_nrm=0.003  cos=0.998  fve_nrm=0.942
+    Structured list format: bullet-pointed facts about Paris, establishing a pattern of cultural/travel descriptions.
+    
+    The sentence describing Montmartre ("Sacré-Cœur Basilica: a stunning") is a list of iconic Parisian attractions, mirroring the entry about Sacré-Cœur.
+    
+    Final token "a stunning" opens a noun phrase describing the Sacré-Cœur Basilica ("Sacré-Cœur, a stunning"), requiring a noun like "church/cathedral atop Montmartre" or "white basilica on a hilltop." or "church in white, overlooking Paris." or "church in Montmartre, white basilica." or "cathedral at the top of a hill."
+
+[170]  REPLY   token=' white'  ||v||=57660.5  mse_nrm=0.004  cos=0.998  fve_nrm=0.927
+    Structured listicle format: a structured FAQ/article about Paris attractions, covering historical facts about Sacré-Cœur.
+    
+    The text is enumerating famous Parisian landmarks: "Sacré-Cœur Basilica, a stunning white" establishes a list of iconic Parisian churches/landmarks, including Sacré-Cœur.
+    
+    Final token "a white" opens a noun phrase describing the Sacré-Cœur Basilica's appearance ("Sacré-Cœur, a stunning white"), requiring a noun like "church" or " basilica" to complete the iconic architectural description of Montmartre. or "church in Montmartre." or "stone basilica in Montmartre." or " basilica."
+
+[171]  REPLY   token=' basilica'  ||v||=67154.5  mse_nrm=0.006  cos=0.997  fve_nrm=0.890
+    Structured list format: a numbered listicle of Paris attractions, establishing a pattern of brief descriptions.
+    
+    The sentence "Montmartre: the Sacré-Coeur, a beautiful white basilica" is a list of iconic Parisian attractions, mirroring the description of Sacré-Coeur in Montmartre.
+    
+    Final token "a white basilica" ends a descriptive entry for Sacré-Coeur ("Sacré-Coeur, a beautiful white basilica"), requiring continuation like "on a hilltop in Montmartre" or "located atop Montmartre." or "on a hilltop overlooking Paris." or "on the north hill, overlooking Paris." or "in Paris, overlooking the Eiffel Tower."
+
+─── Summary (positions 4+; first 4 are system-prompt, OOD in training) ───
+  mse_nrm:  mean=0.010  median=0.009  min=0.003  max=0.048
+  cos:      mean=0.995  (from mse_nrm = 2(1-cos))
+  fve_nrm:  mean=0.821  median=0.848  (denom=0.0579 from training)
+  fve_nrm>0.5:  165/168 positions
+  fve_nrm>0.8:  116/168 positions
+  fve_nrm<0:    0/168 positions (worse than predict-mean)
+
+────────────────────────────────────────────────────────────────────────────────
+4. SAMPLING VARIANCE — pos 171 (token=' basilica', ||v||=67154.5)
+   4× temp=1.0. Max left-context position → upper
+   bound on decoder tightness.
+────────────────────────────────────────────────────────────────────────────────
+
+  greedy (t=0):
+    Structured list format: a numbered listicle of Paris attractions, establishing a pattern of brief descriptions.
+    
+    The sentence "Montmartre: the Sacré-Coeur, a beautiful white basilica" is a list of iconic Parisian attractions, mirroring the description of Sacré-Coeur in Montmartre.
+    
+    Final token "a white basilica" ends a descriptive entry for Sacré-Coeur ("Sacré-Coeur, a beautiful white basilica"), requiring continuation like "on a hilltop in Montmartre" or "located atop Montmartre." or "on a hilltop overlooking Paris." or "on the north hill, overlooking Paris." or "in Paris, overlooking the Eiffel Tower."
+    → MSE=0.006  cos=0.997
+
+  t=1 sample 0:
+    Structured listicle format: a numbered tour/guide entry about Paris attractions, establishing paired descriptions of landmarks.
+    
+    The sentence pattern "Montmartre, famous Eiffel Tower, Louvre — a beautiful white basilica" is a list of iconic Parisian landmarks, each brief.
+    
+    Final token "a white basilica" ends a landmark description of Sacré-Cœur ("Sacré-Cœur, a stunning white basilica"), requiring a location descriptor like "on a hilltop in Montmartre" or "on top of Montmartre hill." or " overlooking Paris overlooking the city." or "located in Montmartre, with stunning views." or "on a hilltop in Paris, with a cathedral."
+    → MSE=0.006  cos=0.997
+
+  t=1 sample 1:
+    Structured list format: a numbered overview of Paris attractions, establishing factual cultural/travel content.
+    
+    The list pattern: "Paris attractions: the Louvre, Eiffel Tower, Notre Dame Cathedral, a stunning white basilica" signals ongoing enumeration of iconic Parisian spots.
+    
+    Final token "a white basilica" ends a description of Sacré-Cœur ("Sacré-Cœur, a beautiful white basilica"), requiring a location completion like "on Montmartre hill" or "on top of Montmartre" to specify the iconic Parisian landmark. or " overlooking Paris, overlooking the city." or "on a hilltop at Montmartre." or "on the north hill, famous for..." or "."
+    → MSE=0.006  cos=0.997
+
+  t=1 sample 2:
+    Structured list format: answer is a numbered/bulleted overview of Paris attractions, establishing a pattern of cultural landmarks.
+    
+    The sentence describing Parisian attractions "Montmartre, famous artist district; Sacré-Cœur, a white basilica" is a list of iconic attractions, reinforcing the Montmartre entry.
+    
+    Final token "a white basilica" ends a descriptive entry for Sacré-Cœur ("a beautiful white basilica"), requiring a location descriptor like "on top of Montmartre hill" or "located on a hilltop in Paris." to complete the description of the Sacré-Cœur cathedral. or "on Montmartre overlooking the city." or "in Paris at the."
+    → MSE=0.006  cos=0.997
+
+  t=1 sample 3:
+    Structured list format: numbered entries covering Paris attractions, establishing a pattern of destination descriptions.
+    
+    Travel/tourism content: "Paris attractions include the Louvre Museum, Eiffel Tower, and Sacré-Cœur Basilica" signals an incomplete list of iconic Parisian landmarks.
+    
+    Final token "a white basilica" ends a landmark description clause ("Sacré-Cœur, a stunning white basilica"), requiring a location description like "on Montmartre hilltop" or "on top of Montmartre", completing the description of the Sacré-Cœur Basilica, Paris. or "overlooking the city". or "located on a hilltop in Montmartre." or "on a hilltop with views of Paris."
+    → MSE=0.007  cos=0.996
+
+════════════════════════════════════════════════════════════════════════════════

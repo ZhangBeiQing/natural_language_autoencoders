@@ -1,0 +1,44 @@
+# Quick end-to-end verification — 10 docs, tiny model, single GPU.
+# Tests the full stage0→1→2→3 pipeline before committing to a real 100k run.
+
+base_model: Qwen/Qwen2.5-0.5B-Instruct
+layer_index: 10
+output_dir: /tmp/nla_quick_test
+
+corpus:
+  name: HuggingFaceFW/fineweb
+  config: sample-10BT
+  split: train
+  text_column: text
+  start: 0
+  length: 10
+
+stage0:
+  positions_per_doc: 3
+  chunk_size: 10
+  seed: 42
+  multigpu: false
+  extractor_kwargs: {batch_size: 4, max_length: 1024}
+
+stage1:
+  av_sft_frac: 0.25
+  ar_sft_frac: 0.25
+  rl_frac: 0.50
+  seed: 42
+
+stage2:
+  provider_cls: nla.datagen.providers.AnthropicProvider
+  provider_kwargs:
+    model: claude-haiku-4-5-20251001
+    max_tokens: 300
+    concurrency: 8
+  chunk_size: 64
+
+stage3:
+  keep_debug_metadata: true
+
+shuffle:
+  enabled: true
+  seed: 42
+
+storage_cls: nla.datagen.storage.LocalStorage

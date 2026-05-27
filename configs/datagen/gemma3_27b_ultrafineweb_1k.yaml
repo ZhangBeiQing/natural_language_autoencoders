@@ -1,0 +1,58 @@
+# Gemma-3-27B 1k-doc SMOKE TEST — verify stage0 works on 27b + stage2 cache_from hits.
+# Same corpus slice as gemma3_12b_ultrafineweb_1k → identical decoded text →
+# cache_from should give ~100% hit rate → stage2 makes ZERO API calls.
+# If cache misses: something is wrong with tokenizer/position identity; fail loud.
+#
+# Run:  python -m nla.datagen.run_pipeline --config configs/datagen/gemma3_27b_ultrafineweb_1k.yaml
+
+base_model: google/gemma-3-27b-it
+layer_index: 41     # 62 layers × 2/3 = 41.33 → 41. Critic gets 42 layers.
+output_dir: /tmp/nla_gemma3_27b_ultrafineweb_1k
+
+corpus:
+  name: openbmb/Ultra-FineWeb   # see qwen7b_ultrafineweb_100k.yaml header re: dataset size
+  config: null
+  split: en
+  text_column: content
+  start: 0
+  length: 1000
+
+stage0:
+  positions_per_doc: 10
+  chunk_size: 256
+  seed: 42
+  multigpu: true
+  extractor_kwargs: {batch_size: 4, max_length: 4096}   # 27b ≈ 2.25×12b params
+
+stage1:
+  av_sft_frac: 0.25
+  ar_sft_frac: 0.25
+  rl_frac: 0.50
+  seed: 42
+
+stage2:
+  # Cache hits ONLY — no API fallback needed. 12b's 100k-run explained parquets
+  # cover all 1k-subset texts (1k is a prefix of 100k, same seed/positions).
+  # AnthropicProvider is there as a safety net (a few misses won't break things)
+  # but if we see ANY provider calls in the log, that's the smoke signal: cache
+  # reuse isn't working and the 100k run would cost ~500k API calls.
+  cache_from:
+    - /path/to/gemma3_12b_ultrafineweb_100k/av_sft_explained.parquet
+    - /path/to/gemma3_12b_ultrafineweb_100k/ar_sft_explained.parquet
+  cache_storage_cls: nla.datagen.storage.LocalStorage
+  provider_cls: nla.datagen.providers.AnthropicProvider
+  provider_kwargs:
+    model: claude-haiku-4-5-20251001
+    max_tokens: 300
+    temperature: 1.0
+    concurrency: 10
+  chunk_size: 512
+
+stage3:
+  keep_debug_metadata: true
+
+shuffle:
+  enabled: true
+  seed: 42
+
+storage_cls: nla.datagen.storage.LocalStorage

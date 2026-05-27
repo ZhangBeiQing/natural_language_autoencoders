@@ -1,0 +1,21 @@
+diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/entrypoints/http_server.py
+--- a/python/sglang/srt/entrypoints/http_server.py
++++ b/python/sglang/srt/entrypoints/http_server.py
+@@ -
+     """Handle a generate request."""
+     # === NLA: skip FastAPI auto-parse (155ms/req for 448K floats) ===
+     data = orjson.loads(await request.body())
++    # === NLA: bf16-base64 input_embeds (12MB→2.8MB on the wire) ===
++    # Client sends bf16 bytes (viewed as int16 — numpy has no bf16) b64-encoded
++    # + shape; reinterpret here. Downstream io_struct.py:328 isinstance(..., float)
++    # needs Python floats so .tolist(). schedule_batch.py casts to bf16 anyway,
++    # so bf16 transport is bit-exact end-to-end (fp16 would lose dynamic range).
++    if "input_embeds_b64_bf16" in data:
++        import base64, numpy as np, torch
++        raw = base64.b64decode(data.pop("input_embeds_b64_bf16"))
++        shape = data.pop("input_embeds_shape")
++        i16 = np.frombuffer(raw, dtype=np.int16).reshape(shape).copy()
++        data["input_embeds"] = (
++            torch.from_numpy(i16).view(torch.bfloat16).float().tolist()
++        )
+     obj = GenerateReqInput(**{k: v for k, v in data.items() if k in _GEN_REQ_FIELDS})

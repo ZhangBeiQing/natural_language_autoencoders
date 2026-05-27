@@ -1,0 +1,61 @@
+# Gemma-3-27B full 100k-doc run. Re-extract vectors, REUSE explanations from 12b.
+#
+# stage2.cache_from: 12b and 27b share a tokenizer → identical text → 99.6% hit.
+# Verified 2026-03-13: doc_id overlap 100%, (doc_id, n_raw_tokens) mismatch 0.
+# 968 misses = positions 12b's stage2 DROPPED (refusal/truncated/no-close-tag).
+#
+# Prereq: huggingface-cli login (gemma-3 is gated)
+# Run:    python -m nla.datagen.run_pipeline --config configs/datagen/gemma3_27b_ultrafineweb_100k.yaml
+
+model: gemma27b  # → layer_index=41, d_model=5376, extractor batch_size=4, device_map=cuda:0
+base_model: google/gemma-3-27b-it  # or local path if pre-downloaded
+output_dir: /tmp/nla_gemma3_27b_ultrafineweb_100k
+
+corpus:
+  name: openbmb/Ultra-FineWeb   # see qwen7b_ultrafineweb_100k.yaml header re: dataset size
+  config: null
+  split: en
+  text_column: content
+  start: 0
+  length: 100000
+
+stage0:
+  positions_per_doc: 10
+  chunk_size: 256
+  seed: 42
+  multigpu: true
+
+stage1:
+  av_sft_frac: 0.25
+  ar_sft_frac: 0.25
+  rl_frac: 0.50
+  seed: 42
+
+stage2:
+  # --cache-from: 99.6% hit. Verified 2026-03-13: doc_id overlap = 100.00% (stage1
+  # splits identical), (doc_id, n_raw_tokens) text-mismatch = 0 (tokenizers are
+  # byte-identical). The 968 misses are positions 12b's stage2 DROPPED (refusal/
+  # truncated/no-close-tag) — those texts never got a cached explanation. 27b
+  # av_sft_raw 249,956 - 12b av_sft_explained 248,988 = 968 exactly. Expected.
+  #
+  # AnthropicProvider with sonnet-4-6 (same model 12b used) for the ~2k misses.
+  cache_from:
+    - /path/to/gemma3_12b_ultrafineweb_100k/av_sft_explained.parquet
+    - /path/to/gemma3_12b_ultrafineweb_100k/ar_sft_explained.parquet
+  cache_storage_cls: nla.datagen.storage.LocalStorage
+  provider_cls: nla.datagen.providers.AnthropicProvider
+  provider_kwargs:
+    model: claude-sonnet-4-6
+    max_tokens: 300
+    temperature: 1.0
+    concurrency: 20
+  chunk_size: 65536
+
+stage3:
+  keep_debug_metadata: true
+
+shuffle:
+  enabled: true
+  seed: 42
+
+storage_cls: nla.datagen.storage.LocalStorage

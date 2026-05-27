@@ -1,0 +1,48 @@
+# Gemma-3-12B 1k-doc SMOKE TEST — verify extraction + stage2 API traffic
+# before committing to a 100k run. ~10k vectors, ~5k API calls (AO+AR only).
+#
+# Prereq: huggingface-cli login (gemma-3 is a gated repo)
+# Run:    python -m nla.datagen.run_pipeline --config configs/datagen/gemma3_12b_ultrafineweb_1k.yaml
+
+model: gemma12b
+output_dir: /tmp/nla_gemma3_12b_ultrafineweb_1k
+
+corpus:
+  name: openbmb/Ultra-FineWeb   # see qwen7b_ultrafineweb_100k.yaml header re: dataset size
+  config: null
+  split: en
+  text_column: content
+  start: 0
+  length: 1000
+
+stage0:
+  positions_per_doc: 10
+  chunk_size: 256
+  seed: 42
+  multigpu: true
+
+stage1:
+  av_sft_frac: 0.25
+  ar_sft_frac: 0.25
+  rl_frac: 0.50
+  seed: 42
+
+stage2:
+  provider_cls: nla.datagen.providers.AnthropicProvider
+  provider_kwargs:
+    # haiku is fine for the small-scale test (cheaper, separate rate limits)
+    model: claude-haiku-4-5-20251001
+    max_tokens: 300
+    temperature: 1.0
+    concurrency: 10
+  chunk_size: 512
+  # No cache_from — first Gemma-tokenizer run, no prior explained parquets to join against.
+
+stage3:
+  keep_debug_metadata: true
+
+shuffle:
+  enabled: true
+  seed: 42
+
+storage_cls: nla.datagen.storage.LocalStorage

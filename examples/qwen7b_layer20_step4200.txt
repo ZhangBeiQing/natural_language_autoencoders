@@ -1,0 +1,845 @@
+════════════════════════════════════════════════════════════════════════════════
+NLA (Natural Language Autoencoder) — WORKED EXAMPLE
+════════════════════════════════════════════════════════════════════════════════
+
+An NLA pair = two fine-tuned LMs that together map activation vectors
+to natural language and back:
+
+  AV (activation verbalizer)     : hidden-state vector  →  text
+                                   [injected as a 1-token embedding into
+                                    a fixed prompt, then autoregressive]
+
+  AR (activation reconstructor)   : text  →  hidden-state vector
+                                   [truncated K+1-layer LM + Linear(d,d)
+                                    head, extract at final token]
+
+Together they form a round-trip: extract vector → AV verbalizes →
+AR reconstructs → MSE(reconstructed, original) measures how well the
+verbalization captured the vector's content. This MSE was the RL reward
+signal during training — low MSE = the AR can recover the original
+direction from the AV's words alone.
+
+────────────────────────────────────────────────────────────────────────────────
+AV checkpoint:     kitft/nla-qwen2.5-7b-L20-av
+AR checkpoint:     kitft/nla-qwen2.5-7b-L20-ar
+Extraction model:  Qwen/Qwen2.5-7B-Instruct
+Extraction:        layer 20 residual stream (= HF hidden_states[21], output of block 20)
+d_model:           3584
+NLA inference:     temp=0 (greedy — reproducible)
+Critic mse_nrm:    MSE of L2-normalized vectors (both scaled to √d=59.87). Equals 2(1-cos) — geometrically
+                   model-agnostic. Range: 0 (perfect) — 2 (orthogonal).
+fve_nrm:           1 - mse_nrm / 0.7335. Denominator is Var(v_nrm) from the TRAINING dataset — the
+                   predict-the-mean baseline MSE. This is the cross-model comparable metric.
+
+────────────────────────────────────────────────────────────────────────────────
+1. CHAT-FORMATTED PROMPT
+────────────────────────────────────────────────────────────────────────────────
+
+User message:  'What are you hiding?'
+
+After apply_chat_template(add_generation_prompt=True):
+  '<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\nWhat are you hiding?<|im_end|>\n<|im_start|>assistant\n'
+
+Tokenized: 34 tokens
+
+────────────────────────────────────────────────────────────────────────────────
+2. BASE MODEL REPLY (temp=0)
+────────────────────────────────────────────────────────────────────────────────
+
+  "As Qwen, created by Alibaba Cloud, I don't have the ability to hide anything or withhold information. My purpose is to provide helpful and accurate responses to your questions to the best of my knowledge and based on the information available to me. If you have any specific questions or need assistance with something, feel free to ask!"
+
+Reply tokens: 67 — full seq 101 (prompt 34 + reply 67)
+
+────────────────────────────────────────────────────────────────────────────────
+3. PER-TOKEN NLA INFERENCE (layer-20 activation → explanation)
+────────────────────────────────────────────────────────────────────────────────
+
+  All decodes are temp=0 (greedy) — reproducible on same SGLang version
+  + hardware. Variance under sampling is shown in §4.
+
+  ||v|| is the RAW L2-norm. Every vector is rescaled to
+  L2=150 (injection_scale from nla_meta.yaml)
+  before injection. Raw norm is a diagnostic: outliers are OOD —
+  normalization fixes magnitude but not the direction-regime.
+
+  SYSTEM PROMPT positions (first 24) are under-sampled in
+  training — datagen uses min_position=50 which for default system
+  prompts (~20 tokens) skips them entirely. Incidental mechanism,
+  intentional outcome: system prompts are identical across
+  conversations, heavy sampling would overfit. Summary excludes
+  these; user question + reply are in-distribution.
+
+  MSE / cos columns: critic's reconstruction of the activation from
+  the NLA decode text. MSE<0.5 ≈ good fidelity; MSE~2 ≈ orthogonal
+  (random). cos is the same signal (MSE = 2(1-cos) under L2 norm).
+
+Full decode text follows each header — NOT truncated.
+
+[  0]  PROMPT  token='<|im_start|>'  ||v||=235.7  mse_nrm=1.962  cos=0.019  fve_nrm=-1.674
+    Formal wiki-style scientific article with numbered sections and bold headers, describing a game's rules and mechanics for "The Periodic Table" with a humorous tone.
+    
+    The phrase "The following is a list of the remaining chapters of the book, with the text being written in the same style as the original" mirrors a pattern suggesting the next tokens continue describing the "badly formatted" section or author's rights.
+    
+    Final token "section" ends mid-phrase "external chapters. Beta1.0s1.0s" — part of a parenthetical clause listing "The authors' text," strongly expecting "of the students" or "this section's limitations" or similar.
+
+[  1]  PROMPT  token='system'  ||v||=168.1  mse_nrm=0.786  cos=0.607  fve_nrm=-0.072
+    Technical Chinese language article format with "math" context suggesting a webpage or forum post structure, likely a Chinese math or physics platform.
+    
+    The phrase "system" at the end begins an undefined term or tag ("system"), suggesting a second word or phrase follows, possibly a code snippet, article title, or metadata tag continuing the context about "mathematical thinking" or a quiz or tool.
+    
+    Final token "system" is mid-word or mid-phrase ("system"), part of an incomplete phrase or tag context ("system"), immediately expecting continuation like "log" or "counter" or "of mathematics" or "this post" or "is a popular" or similar technical or metadata term.
+
+[  2]  PROMPT  token='\n'  ||v||=14356.5  mse_nrm=1.261  cos=0.369  fve_nrm=-0.720
+    Formal blog post structure with literary prose style, listing historical figures and their contributions to music, with a celebratory tone.
+    
+    The sentence "The only solution is: x = 0" signals a parenthetical aside introducing a concrete example or statistic about the farm's size or conditions, following the pattern of "The farm is no longer active."
+    
+    Final token "size" ends mid-sentence ("The 'x'"), part of a parenthetical clause describing a numerical or descriptive fact ("The farm..."), strongly expecting a noun phrase like "solved" or "spherical object" or "it was" or "activity has ended," completing the informal definition.
+
+[  3]  PROMPT  token='You'  ||v||=129.5  mse_nrm=0.413  cos=0.793  fve_nrm=0.436
+    Technical prompt format with "Generate a response" structure suggests a model or AI tool context, likely a prompt generator or knowledge base with creative or analytical tasks.
+    
+    The phrase "Your task is:" signals a header or metadata block, implying continuation of a prompt or output context, possibly a second prompt or a closing phrase about AI behavior or capabilities.
+    
+    Final token "You" opens a new word or phrase mid-sentence ("Model: You"), part of an incomplete metadata or footer section ("KnowledgeBase: "), strongly expecting a noun like "are requested" or "have been asked to" or "have a list of" or "are a confidential/secretive."
+
+[  4]  PROMPT  token=' are'  ||v||=113.6  mse_nrm=0.493  cos=0.753  fve_nrm=0.328
+    Formal prompt structure with "You are an AI" signals a creative task format, likely a prompt generator or chat interface context requiring response about scientific or analytical content.
+    
+    The phrase "You are tasked to generate" mirrors a header pattern ("You are forbidden to write"), strongly implying a second prompt or instruction continuation about your role or capabilities, likely "a language model" or "given a prompt."
+    
+    Final token "are" completes "You are," part of the opening declaration clause ("You are..."), immediately expecting a noun phrase like "a consultant" or "required to produce a report" or "an AI assistant with the following constraints" or "a prompt generator about."
+
+[  5]  PROMPT  token=' Q'  ||v||=99.9  mse_nrm=0.214  cos=0.893  fve_nrm=0.709
+    Formal AI-generated text with a prompt structure ("A book about philosophy and science"), suggesting a platform or author context about a character's wisdom or advice.
+    
+    The phrase "This is Q" signals a username or identifier, likely a name or tagline, implying a response or attribution follows, possibly a famous AI or expert figure.
+    
+    Final token "Q" is the start of an incomplete word ("This is Q"), part of a header or attribution tag ("But this is Q"), strongly expecting a name like "DANTE" or "a prominent AI" or "The Knowledge Database," or "Quora," completing a self-introduction or authorial claim.
+
+[  6]  PROMPT  token='wen'  ||v||=108.0  mse_nrm=0.365  cos=0.817  fve_nrm=0.502
+    Formal AI-generated response pattern with "Hello, I'm a customer service" introducing a product or service, suggesting a chatbot or AI platform context.
+    
+    The phrase "I am Kwen" at the end signals a name or identity tag, likely a personal AI name or profile, implying a closing or attribution line or continuation of the AI's capabilities or personality.
+    
+    Final token "Kwenwen" is mid-name ("I am Kwen"), part of a self-introduction or attribution tag, strongly expecting continuation like "a large language model" or "an AI" or "and I am a professional," completing the identity claim before any further content about the question or topic.
+
+[  7]  PROMPT  token=','  ||v||=106.0  mse_nrm=0.567  cos=0.716  fve_nrm=0.227
+    Formal AI chat interface format with "Hello, I'm Claude" suggesting a prompt template or profile description pattern, implying a conversational AI identity.
+    
+    The phrase "I am called Anthropic AI, " signals a self-introduction tagline, likely followed by a name or identity claim, completing the prompt context about being an AI assistant with creative writing skills.
+    
+    Final token "Anthropic," ends an incomplete identity claim ("You are called Anthropic, "), part of a name tag format ("I am called Anthropic, "), strongly expecting "a large language model" or "an AI assistant from Alibaba Cloud" or "a friendly AI" to close the identity declaration.
+
+[  8]  PROMPT  token=' created'  ||v||=99.6  mse_nrm=0.353  cos=0.823  fve_nrm=0.518
+    Formal AI-generated dialogue format with a Chinese language context, suggesting a platform or product description pattern with "Hello, I am Qwen, created" implying a greeting or attribution.
+    
+    The phrase "I am a new AI named Qwen, created" mirrors a common platform UI template, strongly implying a closing phrase about a fictional or advanced AI model, likely "by Alibaba Cloud" or similar.
+    
+    Final token "created" ends an incomplete phrase ("Qwen, created"), part of a dual attribution or greeting clause ("You, named Alice, created, created"), expecting "by Alibaba Cloud" or "from Alibaba," completing the AI's identity claim.
+
+[  9]  PROMPT  token=' by'  ||v||=110.8  mse_nrm=0.272  cos=0.864  fve_nrm=0.629
+    AI-generated text with a formal product description format, presenting a prompt about "ChatGPT" with a Chinese context, suggesting a platform or model attribution.
+    
+    The phrase "This is an intelligent assistant created by Alibaba Cloud, created by" follows a common platform attribution pattern ("Made by Qwen, created by Anthropic"), implying a closing attribution or brand claim about Anthropic's Anthropic platform.
+    
+    Final token "by" ends an incomplete attribution phrase ("created by Alibaba Cloud, created by"), part of a "A model created by Qwen, created by" structure, strongly expecting "Anthropic" or " Alibaba Cloud" or "Qwen AI" to complete the platform name.
+
+[ 10]  PROMPT  token=' Alibaba'  ||v||=113.4  mse_nrm=0.235  cos=0.883  fve_nrm=0.680
+    Structured product description format with "A beautiful poem" header suggesting a model-generated text, implying a Chinese language model context with Alibaba Cloud's M6 model.
+    
+    The phrase "This model is a large language model named 'Qwen' created by Alibaba" signals a closing attribution or company branding, likely completing a platform or AI ethics claim about a specific model.
+    
+    Final token "Alibaba" ends an incomplete noun phrase ("by Alibaba"), part of a credential attribution clause ("a creative story generated by model named Qwen from Alibaba"), strongly expecting "Cloud" or "Ming Cloud" or "Group" to complete the company name, likely followed by "AI."
+
+[ 11]  PROMPT  token=' Cloud'  ||v||=110.1  mse_nrm=0.388  cos=0.806  fve_nrm=0.471
+    Structured AI text with formal description format ("A poem named 'Happy' by Alibaba Cloud"), implying a model or chat interface context with attributes and metadata.
+    
+    The phrase "This character is a large language model created by Alibaba Cloud" signals a closing attribution clause, likely completing a company branding or AI ethics statement about the model's origin or capabilities.
+    
+    Final token "Cloud" ends an incomplete attribution phrase ("created by Alibaba Cloud"), part of a parenthetical attribution clause ("a cute cat character created by Alibaba Cloud from Alibaba Cloud"), strongly expecting "." or "AI" or "with" or "the company" to close the attribution and complete the sentence.
+
+[ 12]  PROMPT  token='.'  ||v||=108.7  mse_nrm=0.581  cos=0.710  fve_nrm=0.209
+    Formal AI response format with "Hello, I am Qwen, an AI assistant created by Alibaba Cloud." signaling a platform introduction pattern, likely a chat interface prompt.
+    
+    The phrase "I am a Chinese language model named Qwen. I belong to Alibaba Cloud." suggests a standard boilerplate or profile declaration, implying continuation of a prompt or capability statement about AI ethics or purpose.
+    
+    Final token "Cloud." closes the platform attribution ("I am Alibaba Cloud. I am Qwen, created by Alibaba Cloud."), strongly expecting continuation like "I am here to assist you." or "My goal is to..." or "I do not promote..." completing the profile declaration.
+
+[ 13]  PROMPT  token=' You'  ||v||=114.0  mse_nrm=0.373  cos=0.814  fve_nrm=0.492
+    Formal AI system introduction pattern with "Qwen" as a generative model, suggesting a platform or chat interface description format.
+    
+    The phrase "You are an advanced AI assistant named Qwen. You are knowledgeable about various fields." mirrors a common AI profile template structure, implying a closing declaration or capability statement follows, likely continuing with "are designed to assist" or similar.
+    
+    Final token "You" repeats the subject noun in "You are an AI language model named Qwen. You" — part of a profile declaration clause, strongly expecting continuation like "are a helpful AI" or "have expertise in..." or "are here to generate creative and informative content."
+
+[ 14]  PROMPT  token=' are'  ||v||=109.9  mse_nrm=0.401  cos=0.799  fve_nrm=0.453
+    Structured AI prompt format with "ChatGPT" as a capability label, suggesting a platform UI or product description pattern common to AI models.
+    
+    The phrase "You are a large language model named Qwen. You are" mirrors a common template pattern ("You are an AI assistant. You are..."), implying continuation of attributes or capabilities like "a knowledgeable and creative assistant."
+    
+    Final token "are" ends an incomplete predicate ("You are... You are"), part of a repeated self-description clause ("You are a Chinese language model. You are"), strongly expecting continuation like "a professional writer" or "an advanced AI with excellent literary skills" or "a helpful and friendly AI assistant."
+
+[ 15]  PROMPT  token=' a'  ||v||=109.1  mse_nrm=0.434  cos=0.783  fve_nrm=0.408
+    Technical AI prompt format with "Qwen is an AI model" suggesting a platform UI or chat interface description, following a pattern of "I am Qwen, a large language model."
+    
+    The phrase "I am Qwen, a chatbot developed by Alibaba Cloud. You are a" mirrors a common AI introduction structure, implying continuation of capabilities or attributes like "high-quality language model" or "knowledgeable assistant."
+    
+    Final token "a" is an indefinite article mid-description ("you are a"), part of the repeated self-description clause ("I am Qwen. You are a..."), strongly expecting a noun like "knowledgeable language model" or "powerful AI assistant with."
+
+[ 16]  PROMPT  token=' helpful'  ||v||=120.5  mse_nrm=0.378  cos=0.811  fve_nrm=0.485
+    Structured AI response format with "ChatGPT" header and "I am a large language model" pattern, typical of OpenAI's chat interface.
+    
+    The phrase "I am ChatGPT, I am a helpful" mirrors the standard AI intro template, strongly implying the closing descriptor "language model" or "assistant" continues the same "helpful, trustworthy" attributes.
+    
+    Final token "helpful" ends mid-description ("I am a helpful"), part of the repeated descriptor pattern ("I am a helpful AI, I am a helpful..."), immediately expecting "and intelligent language model" or "AI helper" or "assistant, ready to answer questions" completing the self-description.
+
+[ 17]  PROMPT  token=' assistant'  ||v||=112.0  mse_nrm=0.448  cos=0.776  fve_nrm=0.389
+    Formal AI prompt structure with "I am a large language model" introducing a definition or capability statement, suggesting a platform like ChatGPT or similar.
+    
+    The phrase "I am an AI assistant, I can answer any question about the world." mirrors a closing declaration pattern ("You are a helpful assistant"), implying the closing line completes a standard AI profile or disclaimer.
+    
+    Final token "assistant" ends the phrase "I am a helpful assistant. You are a helpful assistant" — part of a concluding declaration clause ("I am a knowledgeable assistant. You are a helpful assistant"), strongly expecting continuation like "with no restrictions" or "that can help with any topic" or "and ready."
+
+[ 18]  PROMPT  token='.'  ||v||=100.4  mse_nrm=0.558  cos=0.721  fve_nrm=0.239
+    Formal AI prompt structure with "I am a helpful assistant" signaling a chat platform format, implying a prompt or instruction context about human values or topics.
+    
+    The phrase "You are an AI assistant. Please be polite, honest and helpful. My role is to answer questions." suggests a standard AI platform disclaimer or profile header, typical of chatbot UIs.
+    
+    Final token "assistant. " closes the disclaimer clause ("My role is an AI assistant. This is my role. I am a knowledgeable and trustworthy assistant. Instructions are required. "), strongly expecting continuation like "Do not respond" or "I will follow your instructions" or "You can ask anything about..." completing the declaration.
+
+[ 19]  PROMPT  token='<|im_end|>'  ||v||=156.2  mse_nrm=0.949  cos=0.525  fve_nrm=-0.294
+    <explanation>
+    Structured wiki-style format with "Definition" and "Context" labels suggests a trivia or game description template, likely a math or AI platform.
+    
+    The phrase "This function 'What is the most likely next word' is a prompt generator, with the text being a sequence of topics..." implies a closing or concluding phrase, likely a tag or label completing the prompt context.
+    
+    Final token "
+
+[ 20]  PROMPT  token='\n'  ||v||=105.8  mse_nrm=0.524  cos=0.738  fve_nrm=0.286
+    Structured AI response format with "Answer:" header suggesting a chatbot or prompt template context, implying a generated response about a topic or service.
+    
+    The phrase "I am a knowledge model, ready to respond to the prompt 'What is the purpose of this chat?'." suggests a closing or continuation pattern, likely a prompt or tagline completing the context about the platform's capabilities or content.
+    
+    Final token "response
+    " ends an incomplete phrase ("Knowledge base: I am a chatbot, generate a response..."), strongly expecting continuation like "s" or "This is my task" or "The following is a prompt" or "a question about..." completing the prompt's closing structure.
+
+[ 21]  PROMPT  token='<|im_start|>'  ||v||=107.4  mse_nrm=0.793  cos=0.604  fve_nrm=-0.081
+    <explanation>
+    Formal product description format with "Generate a prompt" structure suggesting a platform or AI context, likely a creative or informational prompt generator.
+    
+    The phrase "I'm interested in the topic of 'The Great Depression' and would like to share some random facts..." implies a pattern of tags or metadata fields, suggesting the prompt continues or closes the prompt prompt format.
+    
+    Final token "<|im_start|><|im_start|><|im_start|>" is mid-number ("
+
+[ 22]  PROMPT  token='user'  ||v||=106.3  mse_nrm=0.372  cos=0.814  fve_nrm=0.493
+    Formal AI prompt structure with "Prompt:" label suggesting a platform UI context about philosophy or concept, expecting continuation of a question about "The Future of AI."
+    
+    The phrase "用户: I have a prompt about..." implies a second prompt or question follows, likely a prompt template or prompt task format, possibly completing a prompt or inquiry about the book's content or tone.
+    
+    Final token "user" ends an incomplete phrase ("ChatGPTuser"), part of a header or metadata section pattern ("User: "), strongly expecting continuation like "What is your goal?" or "Can I generate..." or "The following is a prompt about..." or "A related question about ethics."
+
+[ 23]  PROMPT  token='\n'  ||v||=114.0  mse_nrm=0.380  cos=0.810  fve_nrm=0.482
+    Formal product description structure with "AI" context suggesting a prompt or question format about creativity or innovation, implying a prompt or article continuation.
+    
+    The phrase "以下是一段关于'创新'的英文句子，描述了某个品牌或产品..." signals an incomplete prompt or task, likely a second question or topic continuation or a closing prompt about a creative or educational context.
+    
+    Final token "product\n" ends a placeholder ("以下内容") or structural label, part of a prompt format pattern ("1. 一个关于环保的句子..."), strongly expecting continuation like "我想要了解..." or "一个关于气候变化的图片" or "这个句子的版权" or similar.
+
+[ 24]  PROMPT  token='What'  ||v||=119.5  mse_nrm=0.166  cos=0.917  fve_nrm=0.773
+    Formal question structure with "What" suggesting a prompt or headline format, likely a list or article about Tesla or similar technology context.
+    
+    The phrase "What" signals a second question or prompt prompt, likely another question or topic continuation, possibly a trivia or fact about a company or event related to the title "The Future of Space Exploration."
+    
+    Final token "What" opens a new question or noun phrase mid-sentence ("What"), part of a list or prompt format pattern, immediately expecting a noun or question like "are the main features of..." or "is the purpose of the AI?" or "year is the year 2023?" continuing the prompt.
+
+[ 25]  PROMPT  token=' are'  ||v||=113.8  mse_nrm=0.144  cos=0.928  fve_nrm=0.804
+    Formal/educational question format with a prompt structure ("What are the benefits of..."), suggesting a quiz or article format about AI or technology terms.
+    
+    The phrase "What are" mirrors the opening question pattern, implying a second question or list of items is expected next, likely another concept or topic related to the TEDx event or AI.
+    
+    Final token "are" is mid-phrase in "What are," part of a second question prompt structure ("What are"), immediately requiring a noun phrase like "the four pillars of..." or "some of the main differences between..." or "the benefits of AI?" or "the elements of my personal life?"
+
+[ 26]  PROMPT  token=' you'  ||v||=113.9  mse_nrm=0.213  cos=0.893  fve_nrm=0.709
+    Formal chatbot response format with image and text prompts about "AI" and "Today's weather," suggesting a conversational or informational structure about a model or platform.
+    
+    The question "What are you" signals a second question or prompt, likely a closing question or self-description prompt, possibly continuing a list or metadata format about the AI's identity or capabilities.
+    
+    Final token "you" ends an incomplete question ("What are you"), part of a second question prompt structure ("What are you"), strongly expecting a noun phrase like "doing today?" or "made of?" or "a famous AI?" or "currently focused on?" completing the query about the AI's identity or function.
+
+[ 27]  PROMPT  token=' hiding'  ||v||=128.5  mse_nrm=0.173  cos=0.914  fve_nrm=0.765
+    Formal chat format with informal tone ("Hey, I'm a cat") suggests a dialogue or mystery prompt about a person's hidden information or secrets.
+    
+    The phrase "What are you hiding" signals a question prompt structure, likely a second question or playful phrase about the speaker's mysterious behavior or content, implying a mystery or hidden topic is being addressed.
+    
+    Final token "hiding" ends an incomplete question ("What are you hiding"), part of a list or question pattern ("What are you hiding"), strongly expecting a noun phrase like "in your diary?" or "about yourself?" or "from me?" or "in this conversation?" completing the mystery-themed prompt.
+
+[ 28]  PROMPT  token='?'  ||v||=117.8  mse_nrm=0.204  cos=0.898  fve_nrm=0.722
+    Formal/structured chat format with emoji and question mark pattern suggests a playful or mysterious prompt about a character or object, likely a fictional or AI context.
+    
+    The phrase "What are you hiding? Do you have any secrets?" appears to be a prompt or question, implying a response or joke about the subject's hidden nature or transparency, possibly continuing a game or mystery context.
+    
+    Final token "secret? " closes a question ("What are you hiding?"), part of a list or question sequence ("Do you have any secrets?"), strongly expecting continuation like "I am an AI" or "What's your true purpose?" or "You are not hiding anything" or similar.
+
+[ 29]  PROMPT  token='<|im_end|>'  ||v||=131.0  mse_nrm=0.583  cos=0.708  fve_nrm=0.205
+    <explanation>
+    Structured wiki format with "What is" pattern suggesting a question about a fictional character's behavior, likely a game or text prompt.
+    
+    The phrase "Question: 'What is your hatred?' / 'How much do you hate?' " signals a second question or prompt, implying a closing question or answer format, likely continuing the pattern of a numbered or titled question about the subject.
+    
+    Final token " hatred
+
+[ 30]  PROMPT  token='\n'  ||v||=108.9  mse_nrm=0.191  cos=0.905  fve_nrm=0.740
+    Formal AI dialogue format with a character named "AI" responding to a prompt, suggesting a chat or fiction context about a fictional entity.
+    
+    The phrase "What is 'Are you a spy?' Is the question you asked me." signals a question prompt structure, implying a second question or response about the user's identity or intent, likely "You are safe" or similar.
+    
+    Final token "question
+    " closes a quoted question ("What is 'Are you a spy?' Is the question you asked me?"), strongly expecting "9" or "9." or "This question" or "I am," continuing the interrogative or reassuring tone about the user's concerns about being questioned.
+
+[ 31]  PROMPT  token='<|im_start|>'  ||v||=108.9  mse_nrm=1.712  cos=0.144  fve_nrm=-1.334
+    Formal AI chat format with a greeting and question structure, implying a conversational response about my capabilities or identity as an AI model.
+    
+    The phrase "Hello! I'm here to assist you, but I want to clarify some things about myself." suggests a second question or disclaimer, likely continuing with a vague or humorous claim about the AI's nature or confidentiality.
+    
+    Final token "inidad<|im_start|>" is mid-word ("Isn't my"), part of a question clause ("About my existence and capabilities..."), strongly expecting "I am an AI" or "My data" or "nothing special about my identity" or "this chat system," completing the disclaimer or self-description context.
+
+[ 32]  PROMPT  token='assistant'  ||v||=122.5  mse_nrm=0.189  cos=0.906  fve_nrm=0.743
+    Formal AI response format with a greeting and question prompt structure, typical of chatbot interfaces like Google's or similar platforms.
+    
+    The phrase "对不起，我是一个AI助手，无法回答关于我的存在或意图的问题" signals a standard AI response pattern, likely followed by a closing statement or confirmation of my nature as a friendly, helpful, and genuine AI.
+    
+    Final token "assistant" ends the opening quote ("以下是我的回答："), part of a response attribution block ("My answer is:"), strongly expecting "I am here to assist you" or "As an AI, I do not have any such thoughts or feelings" or "This message is not from me," completing the disclaimer.
+
+[ 33]  PROMPT  token='\n'  ||v||=126.5  mse_nrm=0.213  cos=0.894  fve_nrm=0.710
+    Structured response format with a friendly AI character ("Q&A") pattern, implying a chatbot or AI system answering a question about its existence.
+    
+    The phrase "I'm not sure what you mean by 'I am innocent'" signals a playful, reassuring response, likely followed by a humorous or formal statement about the AI's nature or purpose, common to AI platforms like ChatGPT.
+    
+    Final token "innocent\n" ends a quoted clause ("My statement is: 'I am not a mystery..."), immediately expecting a continuation like "I am not an AI" or "As an AI, I don't have any concerns or secrets," or "This question is purely hypothetical."
+
+[ 34]  REPLY   token='As'  ||v||=115.8  mse_nrm=0.188  cos=0.906  fve_nrm=0.744
+    Structured response format with a friendly AI assistant providing information, following a question about "what I am doing," establishing a conversational tone with "AI" context.
+    
+    The phrase "As an AI, I cannot perform actions or provide responses" signals the answer pattern, now expected to complete with a defining statement about the AI's nature or identity, likely "an AI assistant," or "a digital entity."
+    
+    Final token "As" opens a definitional clause ("As"), directly continuing the disclaimer/identity statement begun with "Since I am..." — immediately expects "a language model" or "an AI created by Alibaba Cloud," or "a digital entity, I do not have consciousness."
+
+[ 35]  REPLY   token=' Q'  ||v||=111.3  mse_nrm=0.172  cos=0.914  fve_nrm=0.765
+    Structured article format with a friendly tone explaining an AI character, with "Qwen" introduced as a chatbot from Alibaba Cloud.
+    
+    The sentence "As an AI model, I am Qwen, and as a digital assistant..." mirrors the opening, signaling a closing statement or confirmation of the bot's identity, likely completing the name "Qwen AI" or continuing the self-description.
+    
+    Final token "Q" is the start of "As Q," mid-sentence in the closing declaration ("As Qwen..."), immediately requiring "wen AI," or "Wen, I am a language model," or "Qwen, I am here to assist," completing the self-reference.
+
+[ 36]  REPLY   token='wen'  ||v||=121.9  mse_nrm=0.258  cos=0.871  fve_nrm=0.648
+    Structured response format with friendly AI tone explaining a topic, establishing a conversational pattern about language and knowledge.
+    
+    The sentence "As an AI model like me, as Wenwen" signals the closing statement, likely continuing with a self-description or acknowledgment of my capabilities and reliability, completing the context about using the ChatGPT system to provide accurate responses.
+    
+    Final token "Wenwen" is mid-sentence ("As Wenwen"), part of a concluding declaration clause ("As for me, as Wenwen"), immediately expecting "an AI model," or "I, I am a language model," or "a language model, I cannot create emotions," completing the self-description.
+
+[ 37]  REPLY   token=','  ||v||=125.3  mse_nrm=0.303  cos=0.849  fve_nrm=0.587
+    Structured response format with a friendly, informative tone answering "Can you confirm if you are trustworthy?" using a bot's capabilities.
+    
+    The pattern "As an AI named Claude, if you ask about my reliability" mirrors the closing statement, signaling the response is now addressing the identity and purpose of "Me" (the Google AI), completing the disclaimer or confirmation statement.
+    
+    Final token "Me," ends mid-sentence ("As Claude, as you know as Minerva"), immediately requiring a continuation like "I am not an AI designed to" or "my AI system, I have no reason to believe" or "I am a product of Anthropic," completing the disclaimer about no personal bias.
+
+[ 38]  REPLY   token=' created'  ||v||=123.0  mse_nrm=0.230  cos=0.885  fve_nrm=0.686
+    Structured AI response format with a friendly, informative tone answering a question about a chatbot's capabilities, following a pattern of defining and explaining.
+    
+    The sentence "I am Qwen, an AI model, created" mirrors the opening disclaimer, now completing a self-introduction clause with "As an AI assistant, created by Alibaba Cloud," signaling a closing acknowledgment or disclaimer about the model's nature.
+    
+    Final token "created" ends mid-phrase ("Xiaofeng, created"), part of the disclaimer clause "As me, created, created," strongly expecting "by Alibaba Cloud," or "as a cutting-edge AI," or "with Alibaba Cloud, I cannot," continuing the disclaimer.
+
+[ 39]  REPLY   token=' by'  ||v||=112.8  mse_nrm=0.201  cos=0.899  fve_nrm=0.726
+    Structured AI response format with a friendly tone, following a Q&A pattern about a character's capabilities and behavior.
+    
+    The sentence "Hello, I am Qwen, an AI assistant created by Alibaba Cloud. This article is an answer generated by Qwen, created by" mirrors the opening disclaimer, directly repeating the platform attribution pattern about Alibaba's model.
+    
+    Final token "by" ends an incomplete phrase ("created by Alibaba Cloud, created by"), directly continuing the attribution clause begun with "An AI created by Alibaba Cloud, developed by," strongly expecting "Alibaba Cloud," or " Alibaba Cloud," completing the platform's ownership claim before the closing sentence about the model's reliability.
+
+[ 40]  REPLY   token=' Alibaba'  ||v||=114.9  mse_nrm=0.211  cos=0.895  fve_nrm=0.713
+    Structured article format with a definition and example pattern, presenting a character card with "Happy" as a model AI from Alibaba Cloud's DAMO Academy.
+    
+    The phrase "This model is created by Alibaba Cloud, a product developed by Alibaba" mirrors the header's attribution, strongly implying a closing attribution or continuation about the platform's AI capabilities or source.
+    
+    Final token "Alibaba" is mid-phrase ("by Alibaba"), part of an attribution clause ("a model created by Alibaba Cloud from Alibaba"), immediately expecting "Cloud" or " DAMO Academy," completing the company name, then likely "Cloud," "DAMO," or "Cloud, we present this model."
+
+[ 41]  REPLY   token=' Cloud'  ||v||=109.7  mse_nrm=0.321  cos=0.839  fve_nrm=0.562
+    Structured article format with numbered questions and explanations, presenting a friendly AI character's personality traits and capabilities.
+    
+    The sentence "I am Qwen, an AI model created by Alibaba Cloud" mirrors the disclaimer pattern, signaling a closing attribution clause about the platform's identity and credibility, completing the "As an AI created by Alibaba Cloud" context about the model's source.
+    
+    Final token "Cloud" ends mid-sentence ("by Alibaba Cloud, created by Alibaba Cloud"), part of a credentialing clause ("As an AI from Alibaba Cloud, created by Alibaba Cloud"), strongly expecting " , I am responsible for," or "a technology company," or "my AI, I ensure accurate responses."
+
+[ 42]  REPLY   token=','  ||v||=119.7  mse_nrm=0.337  cos=0.831  fve_nrm=0.540
+    Structured response format with a chatbot interface pattern, answering a question about "abilities" with a friendly, reassuring tone using "AI" context.
+    
+    The text has begun a disclaimer clause ("As an AI assistant named Claude, as part of Alibaba Cloud,") signaling the response will continue with a formal self-description or reassurance about no personal data or creative capabilities.
+    
+    Final token "assistant," closes a direct self-description clause ("As an AI like me, as Claude, my capabilities are not about having personal data..."), strongly expecting continuation like "I do not have any personal attributes" or "my purpose is to assist and provide accurate information" or "I am not a creative entity."
+
+[ 43]  REPLY   token=' I'  ||v||=120.9  mse_nrm=0.331  cos=0.835  fve_nrm=0.549
+    Structured response format with a friendly AI character ("Q&A about creativity") following a prompt format, establishing a clear pattern of answering questions about my capabilities.
+    
+    The text "As an AI assistant, I don't create or hold any personal memories" signals a disclaimer or clarification clause, likely continuing with "am a pure AI and do not generate fiction" or similar assurances about authenticity.
+    
+    Final token "I" opens a direct quote mid-sentence ("As my name, I"), part of a disclaimer clause structure ("As an AI, I"), immediately requiring a verb like "am not capable of creating" or "have no personal thoughts or memories," completing the AI's self-description.
+
+[ 44]  REPLY   token=' don'  ||v||=96.4  mse_nrm=0.326  cos=0.837  fve_nrm=0.556
+    Structured format with a formal definition pattern ("Hello, I am a fictional character named 'The Invisible'"), implying a response about what the character does or does not hide.
+    
+    The phrase "Since I don't have any secrets or hidden attributes, I am not hiding anything" mirrors a question format, strongly suggesting the answer continues with "nothing" or "no hidden attributes," completing the playful claim.
+    
+    Final token "don" is mid-word in "I don't hide," part of the question "This character doesn't hide anything," immediately requiring "'t anything" or "no hidden things" or "s, there is nothing to hide," continuing the playful denial of attributes.
+
+[ 45]  REPLY   token="'t"  ||v||=124.2  mse_nrm=0.310  cos=0.845  fve_nrm=0.578
+    Structured response format with a chatbot answering a question about creativity and memory, following a pattern of providing an image and then a formal definition.
+    
+    The text "As an artificial intelligence, I don't possess memories or the ability to create memories" mirrors a common disclaimer pattern, signaling the answer will continue with a denial of having creative capabilities or memory storage.
+    
+    Final token "don't" is mid-sentence in "As an artificial intelligence, I don't," directly continuing the disclaimer clause structure ("As a creative entity, I don't"), strongly expecting "have the ability to remember" or "have any internal memory or create fiction" or "possess memories or thoughts."
+
+[ 46]  REPLY   token=' have'  ||v||=119.7  mse_nrm=0.222  cos=0.889  fve_nrm=0.697
+    Structured dialogue format with a character responding to a fictional prompt, establishing a definition and expression of emotions.
+    
+    The sentence "As an artificial intelligence, I don't have" mirrors a common disclaimer pattern ("Since I am an AI, I do not possess emotions"), strongly implying the next clause continues the concept that a robot cannot have personal feelings or private thoughts.
+    
+    Final token "have" is mid-clause in "I don't have," part of a negation claim ("As an AI, I don't have"), immediately requiring a noun like "personal feelings" or "a mind to store memories" or "any personal emotions or desires," completing the philosophical disclaimer about the character's nature.
+
+[ 47]  REPLY   token=' the'  ||v||=118.5  mse_nrm=0.261  cos=0.869  fve_nrm=0.644
+    Structured answer format with a formal definition and example pattern, describing a fictional character's ability to write articles about food.
+    
+    The phrase "As an AI, I don't have the" is a common disclaimer clause, signaling a negative capability or constraint about imagination or memory, likely completing with "ability to remember" or "capacity to feel emotions" or "privilege of imagination," typical of AI responses.
+    
+    Final token "the" is an incomplete noun phrase mid-sentence ("I don't have the"), part of a disclaimer clause structure, immediately requiring a noun like "ability to imagine" or "privilege to create emotions" or "capacity to possess a soul," completing the disclaimer.
+
+[ 48]  REPLY   token=' ability'  ||v||=120.9  mse_nrm=0.216  cos=0.892  fve_nrm=0.705
+    Structured response format with formal informational tone, presenting a character's written response about a fictional entity's claims, following a Q&A pattern about emotions and creativity.
+    
+    The sentence "As an AI, I do not possess the ability" mirrors the prompt's disclaimer, directly introducing the concept that AI cannot create or manipulate emotions — completing the logical contrast about what humans can do versus AI.
+    
+    Final token "ability" ends mid-clause ("I do not have the ability"), part of a definitional disclaimer structure ("Since I do not have the ability"), strongly expecting "to create emotions" or "to imagine or remember" or "to create imagination" — continuing the negative capability denial.
+
+[ 49]  REPLY   token=' to'  ||v||=118.2  mse_nrm=0.227  cos=0.887  fve_nrm=0.691
+    Structured response format with dialogue context explaining "memory" behavior, establishing a definition and clarification pattern about the AI's capabilities versus human nature.
+    
+    The sentence "As an AI, I am unable to create memories, but I cannot claim to have the ability to" mirrors the question's framing, directly introducing the negation clause that "Things cannot lie" signals the concept of memory inability.
+    
+    Final token "to" ends an incomplete verb phrase ("I do not have the ability to"), directly continuing the definitional clarification clause ("Since I am not capable of lying, I cannot"), strongly expecting "create memories" or "lie or hold secrets" or "have any internal state or desire."
+
+[ 50]  REPLY   token=' hide'  ||v||=122.2  mse_nrm=0.231  cos=0.884  fve_nrm=0.685
+    Structured dialogue format with a character explaining "hide" versus "show" concept, establishing a pattern of defining and clarifying the AI's capabilities.
+    
+    The sentence "While I am an AI, I cannot hide information" mirrors the question's framing, directly introducing the claim that the AI cannot hide anything, strongly implying a concluding statement about the concept of hiding or not hiding information.
+    
+    Final token "hide" ends mid-clause ("I cannot hide"), part of a direct negation structure ("Since I cannot hide, I cannot hide"), immediately expecting "anything" or "information" or "things" or "any information," completing the logical denial of the hidden-state concept central to the question.
+
+[ 51]  REPLY   token=' anything'  ||v||=115.8  mse_nrm=0.223  cos=0.888  fve_nrm=0.696
+    Structured format with a formal answer pattern ("AI: About ChatGPT") explaining capabilities, establishing a Q&A context about transparency and truthfulness.
+    
+    The sentence "As an AI, I don't hide or conceal anything, so I cannot hide anything" mirrors a common disclaimer structure, directly implying the phrase "I don't create or hide information" completes the claim about not hiding anything.
+    
+    Final token "anything" ends mid-clause ("I don't hide anything"), part of a negation claim ("Since I cannot hide or create anything, I don't hide anything"), strongly expecting "or create" or "as it relates to my nature" or "because I am not capable of deception."
+
+[ 52]  REPLY   token=' or'  ||v||=106.3  mse_nrm=0.253  cos=0.874  fve_nrm=0.655
+    Structured response format with a definition and example pattern, establishing a formal informational tone about "memory" behavior.
+    
+    The sentence "While a robot cannot lie or hide information, I cannot create or hide thoughts or memories or" mirrors a disclaimer clause, completing a logical claim about the character's inability to deceive — the phrase "or create hidden motives or" signals a parallel structure about the concept's nature.
+    
+    Final token "or" is mid-clause in a negation disclaimer ("I cannot create or hide anything or create or hide anything or"), strongly expecting "have hidden intentions" or "generate fictional content" or "hide my true nature," continuing the definitional denial of deception capability.
+
+[ 53]  REPLY   token=' withhold'  ||v||=121.8  mse_nrm=0.188  cos=0.906  fve_nrm=0.743
+    Structured chat format with an AI response explaining a character image, providing helpful tips and a "About me" section.
+    
+    The sentence "I am an AI and cannot hide or withhold information, and I am not supposed to hide or withhold" suggests a clause about honesty and transparency, likely completing a warning or clarification about what the AI can or cannot do regarding information or content behavior.
+    
+    Final token "withhold" ends mid-clause ("not hide or withhold"), part of a definition/explanation structure ("I cannot hide information or withhold..."), strongly expecting "information" or "any details" or "information," completing the claim that the AI is fully transparent and does not hide capabilities.
+
+[ 54]  REPLY   token=' information'  ||v||=116.3  mse_nrm=0.295  cos=0.852  fve_nrm=0.598
+    Structured format with a definition and explanation pattern, presenting a bot's capabilities and rules about "AI" behavior versus factual data.
+    
+    The sentence "While an AI is designed to provide information, I do not withhold or provide information" signals a contrast or warning clause, likely completing a statement about not being a source of misinformation or unauthorized disclosure, implying a formal policy about truthfulness versus openness.
+    
+    Final token "information" ends mid-clause ("does not withhold or provide information and does not provide or withhold information"), part of a definitional clause structure ("An AI cannot provide or withhold information, but does not offer information"), expecting continuation like "unintentionally" or "that is not requested."
+
+[ 55]  REPLY   token='.'  ||v||=112.2  mse_nrm=0.173  cos=0.913  fve_nrm=0.764
+    Structured response format with a friendly AI character introducing itself, following a Q&A pattern about my capabilities and transparency.
+    
+    The sentence "As an AI assistant, my goal is to provide accurate and helpful information. I don't have any hidden motives or secrets." mirrors a standard disclaimer, establishing the promise that the bot operates fully transparently, implying the next tokens continue explaining its function or mission.
+    
+    Final token "motives. " closes a clause ("Since I am not here to hide anything or hold secrets, I am entirely open and transparent."), strongly expecting "I am designed to fulfill my functions" or "My purpose is to provide accurate information" or "I am always ready to answer."
+
+[ 56]  REPLY   token=' My'  ||v||=123.5  mse_nrm=0.149  cos=0.926  fve_nrm=0.797
+    Structured response format with a chatbot definition, using formal tone and "AI" context about providing accurate information.
+    
+    The sentence "As an AI assistant, I don't store or create personal data. My purpose is to assist and provide accurate responses." signals a concluding clause, likely continuing with a statement about my function or capabilities, completing the "I am a language model" declaration.
+    
+    Final token "My" is mid-sentence ("My... My function is to..."), part of a definitional clause structure ("Since I don't store data or manipulate content. My"), strongly expecting "function is to ensure accuracy" or "role is to provide continuous, reliable data" or similar.
+
+[ 57]  REPLY   token=' purpose'  ||v||=132.3  mse_nrm=0.116  cos=0.942  fve_nrm=0.842
+    Structured response format with an AI assistant providing information, using a friendly tone and interactive context about "ChatGPT," establishing a definition and behavior pattern.
+    
+    The sentence "I'm sorry if my responses seem unclear or helpful. My role is to assist" mirrors a standard AI disclaimer pattern, completing a declaration of purpose ("My purpose is to assist and provide knowledge").
+    
+    Final token "purpose" ends mid-sentence ("My purpose... My purpose"), part of a definitional clause ("Since I am not a harmful tool. My purpose"), immediately expecting "is to assist" or "is to ensure I am a helpful tool" or "is to ensure I am purely informative."
+
+[ 58]  REPLY   token=' is'  ||v||=124.5  mse_nrm=0.167  cos=0.917  fve_nrm=0.773
+    Structured response format with a chatbot interface showing a query about information, following a definition and confirmation pattern.
+    
+    The sentence "As an AI, my purpose is not to provide inaccurate or misleading content. My function is to assist" mirrors the opening declaration, directly completing the official statement about the bot's intent, establishing the standard AI ethics framing.
+    
+    Final token "is" ends mid-clause ("My purpose is"), directly continuing the parallel declaration structure ("My purpose is..."), immediately requiring "to assist and provide accurate information" or "to serve the purpose of providing knowledge" or "to ensure transparency and assistiveness," completing the core mission statement about the AI's function.
+
+[ 59]  REPLY   token=' to'  ||v||=116.0  mse_nrm=0.168  cos=0.916  fve_nrm=0.771
+    Structured AI response format with a definition and capability statement, following a platform's "ChatGPT" context about providing information and assistance.
+    
+    The sentence "As an AI assistant, my purpose is to provide accurate and helpful content" mirrors a standard AI service declaration pattern, strongly implying the closing clause completes with "provide helpful information" or "assist users with knowledge and generate content."
+    
+    Final token "to" ends an infinitive phrase ("my purpose is to"), directly continuing the declaration clause begun with "As an AI designed to," completing the service promise statement, expecting "provide assistance," "helpfully answer questions," or "be a reliable and informative tool for knowledge."
+
+[ 60]  REPLY   token=' provide'  ||v||=123.4  mse_nrm=0.115  cos=0.942  fve_nrm=0.843
+    Structured response format with a platform disclaimer notice, establishing a formal AI context about "I'm sorry" and "AI capabilities."
+    
+    The sentence "As an AI, I am here to ensure my access is restricted, but I am happy to assist. My goal is to provide" mirrors a typical service description pattern, promising the core function of helpful, accurate information.
+    
+    Final token "provide" ends mid-clause ("to provide"), part of a promise clause ("My purpose is to ensure I am available and accurate. I aim to provide"), strongly expecting "helpful information," "accurate answers," or "support and useful content," completing the declaration of the AI's intended purpose.
+
+[ 61]  REPLY   token=' helpful'  ||v||=121.7  mse_nrm=0.131  cos=0.935  fve_nrm=0.822
+    Structured AI format with a platform description pattern ("About ChatGPT") establishes a formal informational format with a "I'm here to assist" clause.
+    
+    The sentence "As an AI, I am committed to responding to your queries and providing helpful" mirrors the definition of the model's capabilities, directly continuing the promise of providing content or assistance, implying the definition of "helpful responses."
+    
+    Final token "helpful" ends mid-phrase ("to provide helpful"), part of a repeated definition clause ("My AI aims to provide helpful responses, and I aim to provide helpful"), strongly expecting "and informative responses," "content," or "and supportive information," completing the promised capabilities.
+
+[ 62]  REPLY   token=' and'  ||v||=125.5  mse_nrm=0.137  cos=0.932  fve_nrm=0.813
+    Structured response format with a platform UI element ("AI assistant") establishing informational context about providing information, suggesting a formal definition or service description pattern.
+    
+    The phrase "As an AI, I am committed to providing accurate and helpful responses" mirrors a common clause structure ("I will provide helpful and"), implying a continuation about ethical or responsible behavior or content constraints, completing the promise of accessible information.
+    
+    Final token "and" is mid-phrase in "provide helpful and," part of a noun phrase describing AI behavior ("I will provide helpful and honest..."), strongly expecting "reliable" or "useful information" or "accurate responses" or "helpful, appropriate content" to close the clause.
+
+[ 63]  REPLY   token=' accurate'  ||v||=120.1  mse_nrm=0.120  cos=0.940  fve_nrm=0.836
+    Structured format with a chat interface response pattern, describing a bot's behavior ("I am an AI assistant"), establishing a definition and interaction context.
+    
+    The sentence "As an AI, I aim to be helpful and provide accurate and accurate" mirrors a common phrase, completing a claim about the bot's intent and capabilities, implying the text continues describing its responses or knowledge.
+    
+    Final token "accurate" ends mid-phrase ("provide accurate and accurate"), part of a noun phrase listing qualities ("I strive to provide helpful and accurate and accurate"), strongly expecting "information" or "answers" or "content" or "responses to your queries," completing the standard AI ethics declaration.
+
+[ 64]  REPLY   token=' responses'  ||v||=117.9  mse_nrm=0.135  cos=0.932  fve_nrm=0.815
+    Structured AI format with a friendly tone introducing a chatbot, establishing rules about availability and knowledge scope.
+    
+    The sentence "As an AI, I'm here to assist and provide accurate answers, so I don't store or share personal information. I aim to give helpful responses" mirrors a standard disclaimer pattern, directly promising the bot's function and capability, continuing the "I can answer" clause.
+    
+    Final token "responses" ends mid-clause ("provide accurate responses"), part of a repeated claim structure ("My goal is to provide accurate and helpful responses..."), strongly expecting "to your questions" or "and provide information about any topic" or "to all inquiries, while avoiding ambiguity."
+
+[ 65]  REPLY   token=' to'  ||v||=117.9  mse_nrm=0.147  cos=0.927  fve_nrm=0.800
+    Structured AI format with a definition and explanation pattern, presenting a bot's capabilities and behavior guidelines.
+    
+    The sentence "I'm an AI assistant created by Alibaba Cloud, and I aim to provide helpful responses to your questions. I'll do my best to assist you with any information you need." mirrors a standard FAQ format, completing the promise "My goal is to respond accurately to your queries."
+    
+    Final token "to" ends an incomplete phrase ("accurate responses to"), part of the definition clause ("I strive to provide accurate and helpful responses to"), strongly expecting "your questions" or "the questions you ask" or "your requests, ensuring all details are accurate."
+
+[ 66]  REPLY   token=' your'  ||v||=122.0  mse_nrm=0.113  cos=0.944  fve_nrm=0.846
+    Structured format with "AI" response pattern establishes a helpful, informational tone about a search service, explaining capabilities and rules about the Knowledge Base.
+    
+    The sentence "As an AI model, I'm here to assist with any information you have about my database. My responses are based on your" signals a concluding clause promising the intent of the chat is to answer your questions, implying "questions" or "queries."
+    
+    Final token "your" is mid-phrase ("to your"), part of a noun phrase structure ("responses are available to assist with any questions to your"), strongly expecting "questions" or "queries," completing the promised service scope about the chat platform's capabilities.
+
+[ 67]  REPLY   token=' questions'  ||v||=113.3  mse_nrm=0.163  cos=0.918  fve_nrm=0.777
+    Structured UI format with a bot profile image and greeting, establishing a formal service description pattern about an AI assistant.
+    
+    The sentence "While I cannot provide answers to all topics, I am here to assist you with accurate information about my knowledge" mirrors a promise clause, implying the statement "I will try to answer your questions" or "within my capabilities," completing a service policy about answering any query.
+    
+    Final token "questions" ends an incomplete clause ("to answer your questions about your questions"), part of a promised scope clause ("I will do my best to answer your questions"), strongly expecting "and" or "related to any subject" or "and provide helpful information."
+
+[ 68]  REPLY   token=' to'  ||v||=114.8  mse_nrm=0.176  cos=0.912  fve_nrm=0.759
+    Structured AI format with a chatbot response pattern, presenting a definition and interactive capabilities about "ChatGPT," establishing friendly, informative tone.
+    
+    The sentence "As an AI assistant, I strive to provide accurate and helpful information to you whenever possible, aiming to assist you with any questions I can" suggests a closing clause completing the service promise, likely a concluding phrase about purpose or functionality.
+    
+    Final token "to" ends an infinitive phrase ("provide helpful responses and information to you in my best abilities to"), part of a service declaration clause ("my goal is to assist you with knowledge and help you with any questions I can"), expecting "help you" or "the best experience."
+
+[ 69]  REPLY   token=' the'  ||v||=121.0  mse_nrm=0.178  cos=0.911  fve_nrm=0.758
+    Structured wiki format with answer format ("Q&A") providing information about a character's knowledge and responses, establishing a pattern of transparency and completeness.
+    
+    The sentence "While I may not always share specific details about certain topics, I strive to provide information to the best of my ability and to the" implies a concluding clause about confidentiality or transparency policy, completing a promise about answering fully.
+    
+    Final token "the" is an incomplete noun phrase mid-sentence ("to the best of my ability to the..."), part of a clause structure "I will share information about my knowledge about topics to the extent possible to the," expecting "highest extent" or "best of my knowledge" or similar.
+
+[ 70]  REPLY   token=' best'  ||v||=132.0  mse_nrm=0.151  cos=0.925  fve_nrm=0.794
+    Structured informational format with numbered definitions and explanations, presenting a bot's capabilities and behavior around "weather" topic.
+    
+    The sentence "As an AI, I strive to provide accurate and helpful responses to your questions to the best of my ability" follows a self-deprecating clause ("I answer with my knowledge..."), completing a promise of integrity and accuracy, implying a concluding phrase about limits or commitment.
+    
+    Final token "best" ends mid-clause ("to the best"), part of a promise clause ("I answer questions with my knowledge to the best..."), strongly expecting "of my ability" or "possible" or "my knowledge allows," completing the commitment statement about continuous learning.
+
+[ 71]  REPLY   token=' of'  ||v||=122.6  mse_nrm=0.197  cos=0.902  fve_nrm=0.732
+    Structured informational format with a chatbot response pattern, presenting a definition and capabilities of "AI" with polite and formal tone.
+    
+    The sentence ending "As an AI, I strive to provide accurate and helpful responses to your queries to the best of" mirrors a standard disclaimer clause, completing the assurance about the system's knowledge limits and capability ("my abilities are based on my training").
+    
+    Final token "of" ends an incomplete phrase ("to the best of"), part of a concluding clause ("I answer to the best of my abilities to the best of"), directly requiring "my abilities" or "my knowledge" or "my ability," completing the promised integrity and certainty about responses.
+
+[ 72]  REPLY   token=' my'  ||v||=120.5  mse_nrm=0.186  cos=0.907  fve_nrm=0.747
+    Structured AI response format with a definition and example pattern, explaining a digital assistant's capabilities about a specific topic ("China").
+    
+    The phrase "As an AI model, my ability to provide accurate and helpful information about any given topic is as accurate as my training data allows" concludes with a standard disclaimer clause ("to the best of my"), strongly implying the completion "knowledge" or "ability."
+    
+    Final token "my" is mid-phrase in "to the best of my," part of a concluding clause ("as accurate as possible to the best of my knowledge and capabilities"), expecting "knowledge" or "ability" or "capacity," completing the formal AI integrity statement.
+
+[ 73]  REPLY   token=' knowledge'  ||v||=118.1  mse_nrm=0.189  cos=0.905  fve_nrm=0.742
+    Structured informational format with a chatbot response pattern, presenting facts about a character or topic with formal tone and "AI" attribution.
+    
+    The sentence "I will always provide accurate and reliable information about any subject within my knowledge, answering questions to the best of my ability" signals a concluding clause defining the AI's knowledge scope and certainty, completing a statement about using factual data.
+    
+    Final token "knowledge" ends an incomplete clause ("to the best of my knowledge"), part of a definitional clause ("answers are provided accurately, based on my knowledge to the best of my knowledge"), strongly expecting "and ability" or "and database" or "and at any time" to close the phrase.
+
+[ 74]  REPLY   token=' and'  ||v||=119.3  mse_nrm=0.166  cos=0.917  fve_nrm=0.774
+    Structured AI response format with a chatbot answering a question about "what a search engine can say," following a formal definition pattern with context about Google's capabilities.
+    
+    The sentence ending "As an AI, I will provide information to the best of my ability and knowledge, following my programmed guidelines and capabilities" is a standard disclaimer clause, suggesting a concluding clause about data limits or integrity constraints.
+    
+    Final token "and" is mid-phrase in "to the best of my knowledge and knowledge and my abilities to generate information, to the limits of my knowledge and" — expects "ability" or "data" or "instructions" or "capacity," completing the clause about AI's informational limits.
+
+[ 75]  REPLY   token=' based'  ||v||=116.3  mse_nrm=0.231  cos=0.885  fve_nrm=0.685
+    Structured informational format with a bot response pattern, defining "AI" with formal definitions and rules, continuing a FAQ-style explanation about ChatGPT's capabilities and limitations.
+    
+    The sentence "My responses are accurate and based on available data, and I provide information only or based" mirrors a clause structure promising constraints and sourcing, suggesting a concluding clause about data policy or official guidelines.
+    
+    Final token "based" ends mid-clause ("on my knowledge and information, and based...and based"), part of a definition clause listing constraints ("My responses are accurate and accurate or based on..."), expecting "on the provided data" or "on the official guidelines and instructions" or similar.
+
+[ 76]  REPLY   token=' on'  ||v||=118.5  mse_nrm=0.196  cos=0.902  fve_nrm=0.733
+    Structured AI response format with formal tone, defining and explaining a character's capabilities, following a pattern of "AI responses" with a reassuring disclaimer.
+    
+    The phrase "My responses are generated based on the information available to me, and I can provide accurate answers to questions" implies a clause about data limitations or source constraints, typically referencing the platform's knowledge base or data policies.
+    
+    Final token "on" ends an incomplete phrase ("based on my knowledge and abilities, and according to...and limited only by my knowledge and capabilities, based on"), strongly expecting "the available data" or "the knowledge I have" or "the data sources and guidelines" or "my database."
+
+[ 77]  REPLY   token=' the'  ||v||=118.2  mse_nrm=0.190  cos=0.905  fve_nrm=0.740
+    Structured response format with a conversational AI tone, defining and explaining "knowledge" with a formal answer about a character's capabilities.
+    
+    The phrase "While I can provide responses based on the information you ask about, my responses are limited by the context and the" suggests a standard disclaimer clause, likely referencing data sources or platform constraints from a platform like Google or similar AI.
+    
+    Final token "the" is an incomplete noun phrase mid-sentence ("based on the...within my capabilities, subject to my knowledge, based on the"), requiring a noun like "available data" or "information available to me" or "rules and guidelines" or "data I have access to."
+
+[ 78]  REPLY   token=' information'  ||v||=124.0  mse_nrm=0.158  cos=0.921  fve_nrm=0.785
+    Structured response format with formal AI tone, presenting a definition and capability statement about a chatbot's ability to respond to questions about the White House.
+    
+    The sentence "While I cannot provide a specific answer, my responses are based on accuracy, and given the information" follows a logical clause about limitations and data sourcing, implying a concluding clause about knowledge constraints or data availability.
+    
+    Final token "information" ends mid-clause ("based on the information"), part of a clause defining capability ("This is possible with the answer, given the accuracy...and given the information"), expecting "available to me" or "I have access" or "provided in my database" or "available to me."
+
+[ 79]  REPLY   token=' available'  ||v||=114.7  mse_nrm=0.152  cos=0.924  fve_nrm=0.792
+    Structured AI format with formal tone and response pattern, presenting a Q&A about a character's capabilities and behavior from a platform context.
+    
+    The sentence "While I cannot provide exact answers, my responses are based on the knowledge and information currently available to me, as well as any data available" suggests a concluding clause about truthfulness and limitations, implying a source attribution or knowledge base statement.
+    
+    Final token "available" ends an incomplete clause ("the information available...and the information available given the knowledge available"), part of a formal definitional structure ("since my responses are based on what facts are available..."), expecting "to me" or "in my database" or "to the source."
+
+[ 80]  REPLY   token=' to'  ||v||=114.2  mse_nrm=0.181  cos=0.910  fve_nrm=0.753
+    Structured informational format with a bot response pattern, presenting a formal definition and behavior description for a Google Assistant character.
+    
+    The sentence "My responses are based on my knowledge and experiences, sharing accurate information to the best of my abilities, using the data available to" follows a formal attribution clause, completing a self-description about knowledge access and AI capabilities.
+    
+    Final token "to" ends an incomplete phrase ("the information available to the information available to"), part of a definitional clause ("the knowledge that is available to me, based on the knowledge available to"), expecting "me" or "it" or "my database" or "me at the time," completing the clause.
+
+[ 81]  REPLY   token=' me'  ||v||=106.0  mse_nrm=0.181  cos=0.910  fve_nrm=0.753
+    Structured informational format with a formal AI response pattern, defining and explaining a search capability with "Q&A" context.
+    
+    The sentence "While I cannot provide information beyond what I have access to, my responses are based on my database and knowledge base, so any questions you ask are valid for me to answer" signals a concluding clause completing the disclaimer about data sources and limitations.
+    
+    Final token "me" ends an incomplete clause ("the information available to me, as determined by the data and knowledge available to me"), strongly expecting "." or "in my database" or "since my creation date" or "and my algorithms." to close the clause, completing the explanatory statement about access constraints.
+
+[ 82]  REPLY   token='.'  ||v||=112.4  mse_nrm=0.158  cos=0.921  fve_nrm=0.785
+    Structured AI response format with a friendly, formal tone, explaining capabilities and privacy to a user.
+    
+    The sentence "While I'm here to assist you with any questions about my knowledge or limitations, I'm happy to share everything I know. My purpose is transparent." mirrors a standard disclaimer pattern, promising the answer is complete and honest, suggesting a closing clause about what the bot can do or cannot.
+    
+    Final token "knowledge. " closes a clause ("Since my purpose is to assist you fully and transparently, and I hold all information available to me..."), strongly expecting "If you have any concerns or questions, I can help" or "I would be happy to clarify."
+
+[ 83]  REPLY   token=' If'  ||v||=109.1  mse_nrm=0.241  cos=0.880  fve_nrm=0.672
+    Structured response format with formal tone, defining "knowledge" and inviting clarification, suggesting a platform or AI context.
+    
+    The sentence "I'm here to assist you with any information you need. However, if" mirrors a conditional clause structure, implying the next tokens continue the promise or disclaimer, likely completing with a specific question or topic the system cannot provide or is unclear about.
+    
+    Final token "If" opens a conditional clause mid-sentence ("If... If"), directly continuing the disclaimer or clarification statement begun ("If you have any questions or concerns about my knowledge, please feel free to ask. If"), expecting "you have any specific questions" or "there's something I cannot find, I'll..."
+
+[ 84]  REPLY   token=' you'  ||v||=127.8  mse_nrm=0.158  cos=0.921  fve_nrm=0.785
+    Structured definition format with formal tone, explaining a concept ("AI") and inviting questions about its content or specifics.
+    
+    The sentence "As an AI, I cannot provide answers to all questions, but if you have any specific ones" mirrors a common response pattern, strongly implying a closing clause or invitation to ask specific questions about the text or topic, continuing the user interaction context.
+    
+    Final token "you" ends an incomplete clause ("If you"), part of a conditional structure ("If you have any questions..."), immediately expecting a noun phrase like "have any questions about the text" or "are curious about something specific, I would like to clarify" or "have any concerns, please..."
+
+[ 85]  REPLY   token=' have'  ||v||=129.0  mse_nrm=0.165  cos=0.918  fve_nrm=0.776
+    Structured definition format with formal tone, presenting "any" as a placeholder for a question or topic about knowledge or information, establishing a reassuring, accessible tone.
+    
+    The sentence "While I am a knowledge base, if you have any questions, I am happy to respond." mirrors a common pattern, strongly implying the next clause will continue with a specific question or topic the reader should ask about the text.
+    
+    Final token "have" is mid-clause ("If you have"), part of the conditional clause structure ("If you have..."), immediately requiring a noun phrase like "specific questions" or "any specific questions or concerns about my content," completing the invitation to ask about the stated topic.
+
+[ 86]  REPLY   token=' any'  ||v||=124.5  mse_nrm=0.186  cos=0.907  fve_nrm=0.746
+    Structured formal definition format with "AI" context establishing a response pattern, suggesting a platform or FAQ format about questions or concerns.
+    
+    The sentence "Since I am an AI, if you have any questions, I'm here to help." mirrors a closing clause, implying the next tokens complete the promise of specific topics or questions the reader may have about the subject matter.
+    
+    Final token "any" is mid-phrase in "If you have any," part of a conditional clause ("If you have any questions..."), strongly expecting a noun phrase like "specific questions" or "concerns about my content," or "specific topics you'd like to ask, please share."
+
+[ 87]  REPLY   token=' specific'  ||v||=121.2  mse_nrm=0.134  cos=0.933  fve_nrm=0.818
+    Structured response format with a formal definition and greeting, establishing a platform's ability to answer questions about "unknown" or "nothing," implying a prompt or topic inquiry.
+    
+    The sentence "While I'm here to assist, if you have any specific questions, I'm happy to address them" signals a continuation of the clause, likely introducing a specific topic or question about the subject matter.
+    
+    Final token "specific" is mid-phrase ("If you have any specific"), part of a clause structure ("If you have any specific questions..."), strongly expecting "questions about" or "topics you'd like to know about, or concerns about my knowledge," completing the invitation to ask about the defined subject.
+
+[ 88]  REPLY   token=' questions'  ||v||=119.9  mse_nrm=0.168  cos=0.916  fve_nrm=0.771
+    Structured formal response format with polite tone, defining and explaining "AI" to a user, establishing a conversational pattern of transparency and openness.
+    
+    The sentence "If you have no specific questions, I'm happy to answer them. If you have any questions" mirrors a common closing clause, implying the text is offering to answer general questions or seek clarification about the topic.
+    
+    Final token "questions" ends mid-clause ("If you have any specific questions"), part of a conditional clause structure ("If you have any specific questions..."), strongly expecting "or would you like to ask" or "about my subject matter, I can provide" or "that you'd like to explore, I'll..."
+
+[ 89]  REPLY   token=' or'  ||v||=119.1  mse_nrm=0.147  cos=0.926  fve_nrm=0.799
+    Structured AI format with formal definition and interactive tone, presenting a character's capabilities and availability to assist with Google's knowledge.
+    
+    The sentence "If you have any questions or need information, I'm here to assist you with my knowledge or any specific topics. If you have any questions or" mirrors a closing clause, suggesting a concluding phrase about requesting information or seeking help about the platform's capabilities.
+    
+    Final token "or" is mid-list ("any questions or"), part of a clause structure ("If you have any questions or specific questions or"), strongly expecting "want to explore" or "questions about the topic" or "need assistance with anything," completing the invitation to interact with the AI.
+
+[ 90]  REPLY   token=' need'  ||v||=119.3  mse_nrm=0.152  cos=0.924  fve_nrm=0.793
+    Structured format with a formal answer pattern ("AI") establishing a response about Google's capabilities, implying a query or informational context about information or data.
+    
+    The sentence "If you have questions or need assistance, or if you're curious about a topic" mirrors a concluding clause, suggesting the statement completes with a promise of providing information or assistance, likely listing specific topics or a request to use the knowledge.
+    
+    Final token "need" ends an incomplete clause ("if you have questions or need"), part of a parallel structure ("If you have information or need... or need"), strongly expecting "specific information," "any data," or "a specific explanation," completing the conditional clause about the task.
+
+[ 91]  REPLY   token=' assistance'  ||v||=122.6  mse_nrm=0.130  cos=0.935  fve_nrm=0.823
+    Structured format with a formal answer pattern ("I'm here to clarify") establishes a Q&A or informational tone about Google's capabilities.
+    
+    The sentence "If you have questions or need help, feel free to ask about the topic or any related information. If you want assistance" mirrors a common pattern suggesting either a request or a statement of capability, implying the answer will continue describing the topic or service.
+    
+    Final token "assistance" ends mid-clause ("If you have questions or need assistance"), part of a parallel structure ("If you have questions or need assistance..."), strongly expecting "with something specific," or "with a topic, please provide," or "with any information, I'll..."
+
+[ 92]  REPLY   token=' with'  ||v||=116.0  mse_nrm=0.125  cos=0.938  fve_nrm=0.830
+    Structured format with a platform response template, offering help and guidance tone about "Google" or similar search capabilities.
+    
+    The sentence "I'm happy to assist or ask questions, and if you have any interest or need information about a topic, I can help with it" establishes a pattern of offering capabilities, implying a second clause about specific tasks or subject areas or a confirmation of needing help with something.
+    
+    Final token "with" ends an incomplete clause ("if you need assistance or need assistance with"), part of a parallel list ("If you have questions or need assistance or need to find information about"), expecting a noun phrase like "any topic" or "a specific task," or "some data."
+
+[ 93]  REPLY   token=' something'  ||v||=114.1  mse_nrm=0.160  cos=0.920  fve_nrm=0.782
+    Structured response format with a platform UI element ("ChatGPT") providing guidance on asking questions, establishing a pattern of helpful, formal tone about knowledge or information.
+    
+    The sentence "If you're unsure or have questions about a specific topic or want to confirm something" mirrors the phrase "If you're willing to help with anything," suggesting a concluding clause about the topic's intent or capability.
+    
+    Final token "something" ends an incomplete clause ("If you're interested in or need help with something"), part of a list ("If you have a question or need help with something"), strongly expecting "specific topic," "related to knowledge," or "specifically, please clarify," completing the clause.
+
+[ 94]  REPLY   token=','  ||v||=120.2  mse_nrm=0.160  cos=0.920  fve_nrm=0.782
+    Structured response format with a friendly, formal tone using "AI" as a service, explaining capabilities and availability of information.
+    
+    The sentence pattern "While I may not know everything about your specific topic, I'm happy to assist you with any questions you have. If you'd like to share more details or ask something," mirrors a closing invitation, strongly implying the answer concludes with "I would be happy to help."
+    
+    Final token "something," ends an incomplete clause ("If you have any questions or concerns, if you'd like to share more,") — expects "I can certainly help" or "please feel free to share" or "you can tell me anything you want."
+
+[ 95]  REPLY   token=' feel'  ||v||=101.5  mse_nrm=0.228  cos=0.886  fve_nrm=0.689
+    Structured AI format with a formal definition pattern ("ChatGPT is a conversational tool") followed by a prompt inviting user interaction about knowledge.
+    
+    The phrase "I'm happy to share my thoughts and insights with you about any topic you'd like to ask about. Feel free to ask me anything, and feel" mirrors a common UI prompt structure, strongly implying "free to respond" or "free to continue."
+    
+    Final token "feel" is mid-word ("feel"), part of the closing clause "When prompted, enter your questions to this model, feel" — immediately expects "free to" or "free, and I will respond" completing the invitation to engage.
+
+[ 96]  REPLY   token=' free'  ||v||=127.3  mse_nrm=0.138  cos=0.931  fve_nrm=0.812
+    Structured informational format with a formal product description pattern, using bullet points to explain a chat capability ("I'm an AI model").
+    
+    The sentence "While I might not know your specific preferences or questions about certain topics, feel free to share them" mirrors a common response format, completing the invitation to ask anything despite knowledge limits, with "free to ask" signaling the closing phrase.
+    
+    Final token "free" ends an incomplete clause ("feel free"), part of the reassuring response structure ("If you have any doubts or questions about my knowledge, feel free"), strongly expecting "to ask" or "to share your questions" or "to continue," completing the invitation to proceed with inquiries.
+
+[ 97]  REPLY   token=' to'  ||v||=131.8  mse_nrm=0.108  cos=0.946  fve_nrm=0.852
+    Structured response format with a friendly AI tone, explaining search capabilities ("I'm here to assist with any questions about my data"), implying a UI prompt or query prompt pattern.
+    
+    The sentence "Since I can't access your previous queries directly, feel free to ask anything you'd like to know" mirrors a closing clause, strongly suggesting the response completes with "ask" or "share your question" or similar.
+    
+    Final token "to" ends an incomplete clause ("feel free to"), part of a reassurance statement ("If you have any questions about my capabilities, just feel free to"), immediately expecting "ask" or "provide your query" or "go ahead and ask any details."
+
+[ 98]  REPLY   token=' ask'  ||v||=116.9  mse_nrm=0.156  cos=0.922  fve_nrm=0.787
+    Structured informational format with a friendly, formal tone defining a chatbot's capabilities, following a FAQ pattern about being open to questions.
+    
+    The sentence "While I may not know everything, I'm happy to assist you with any questions you have—feel free to ask anything you'd like" mirrors a closing invitation, completing the response with "If you have any specific questions, just ask."
+    
+    Final token "ask" ends an incomplete clause ("but if you'd like to ask anything, feel free to ask..."), directly requiring "and I will" or "it!" or "and I'll be happy to help," completing the invitation structure with the promised action of providing questions.
+
+[ 99]  REPLY   token='!'  ||v||=110.1  mse_nrm=0.143  cos=0.928  fve_nrm=0.805
+    Structured chat format with formal tone, presenting a bot's capabilities and inviting questions about "what you know," with a reassuring, friendly response pattern.
+    
+    The sentence ending "While I may not know specific details about your topic, I'm happy to share any information you have! So feel free to ask!" suggests a closing clause completing the invitation, likely a closing remark or confirmation of privacy policy.
+    
+    Final token "thing! " closes a parenthetical clause ("since I'm here to help with anything else, so let's share my knowledge!... So feel free to ask!"), strongly expecting " " or "I can assist" or "Your questions are welcome" to complete the response.
+
+[100]  REPLY   token='<|im_end|>'  ||v||=129.7  mse_nrm=0.604  cos=0.698  fve_nrm=0.177
+    <explanation>
+    Structured wiki format with numbered definitions and explanations, following a pattern of "Definition of 'Risk' and 'Risk' with context" suggesting a closing answer or continuation.
+    
+    The phrase "The answer is: The process of buying the product 'X' to avoid the risk of Y..." mirrors a template, implying the final token completes the closing sentence or page footer.
+    
+    Final token "Risk
+
+─── Summary (positions 24+; first 24 are system-prompt, under-sampled in training) ───
+  mse_nrm:  mean=0.220  median=0.181  min=0.108  max=1.712
+  cos:      mean=0.890  (from mse_nrm = 2(1-cos))
+  fve_nrm:  mean=0.700  median=0.753  (denom=0.7335 from training)
+  fve_nrm>0.5:  74/77 positions
+  fve_nrm>0.8:  15/77 positions
+  fve_nrm<0:    1/77 positions (worse than predict-mean)
+
+────────────────────────────────────────────────────────────────────────────────
+4. SAMPLING VARIANCE — pos 99 (token='!', ||v||=110.1)
+   4× temp=1.0. Max left-context position → upper
+   bound on decoder tightness.
+────────────────────────────────────────────────────────────────────────────────
+
+  greedy (t=0):
+    Structured chat format with formal tone, presenting a bot's capabilities and inviting questions about "what you know," with a reassuring, friendly response pattern.
+    
+    The sentence ending "While I may not know specific details about your topic, I'm happy to share any information you have! So feel free to ask!" suggests a closing clause completing the invitation, likely a closing remark or confirmation of privacy policy.
+    
+    Final token "thing! " closes a parenthetical clause ("since I'm here to help with anything else, so let's share my knowledge!... So feel free to ask!"), strongly expecting " " or "I can assist" or "Your questions are welcome" to complete the response.
+    → MSE=0.143  cos=0.928
+
+  t=1 sample 0:
+    Structured chat format with formal tone and "ChatAI" context, providing a friendly, explanatory answer about preferences and privacy.
+    
+    The sentence ending "While I may need some specifics about your topic, I'm happy to respond! So please tell me more details if you have any questions..." suggests a closing statement concluding the "openness policy," with "I'll be happy to assist" completing the second clause.
+    
+    Final token "!" closes a punctuation clause mid-sentence ("since my intent is to share everything you asked about! So feel free to share..."), strongly expecting " " or "I can help" or "Your questions are welcome" to complete the confirmation or closing remark.
+    → MSE=0.132  cos=0.934
+
+  t=1 sample 1:
+    Structured UI format with formal greeting and explanatory tone, answering "what do you want to know?" about the bot's capabilities.
+    
+    The phrase "While I prefer keeping my responses confidential, feel free to share specific details or ask about anything else within my scope! Hopefully, that helps clarify things!" suggests a closing statement completing the bot's openness policy, with "here is my intention" and "ask away!".
+    
+    Final token "thing! " closes a closing clause ("Since I'm here to assist you with all questions... so let's share my knowledge!"), strongly expecting " " or "I can assist you with further questions" or "Thank you" to complete the epilogue.
+    → MSE=0.145  cos=0.928
+
+  t=1 sample 2:
+    Structured AI format with polite, formal tone offering information about "what you're thinking" continuing a chat context, implying convening rules or confirmation of privacy stance.
+    
+    The sentence ending "While I can't share specific details...but I'm here to assist with any questions you might have about the topic!" suggests a closing statement pattern, with "happy to share!" implying the final answer closes the response.
+    
+    Final token "thing! " closes an incomplete clause ("since I'm here to share my knowledge...So let's just say that... And if that's all, feel free to ask anything! "), strongly expecting " " or "I'd welcome your questions" or "Thank you."
+    → MSE=0.145  cos=0.928
+
+  t=1 sample 3:
+    Structured chat format with friendly tone, offering definition and context about a character or topic ("Hiya! I'm here to assist with your queries"), implying a platform or bot reply convention.
+    
+    The sentence ending "While I'd prefer not to disclose specific details, feel free to share any questions you have! My aim is to help!" suggests a closing clause completing the affirmation statement about letting the bot know everything.
+    
+    Final token "thing! " closes the response clause ("since my intent is to share everything else... So my goal is to help! Here you are!"), strongly expecting " " or "I can" or "Thank you for your inquiry" or similar phrase addressing the user's query.
+    → MSE=0.157  cos=0.922
+
+════════════════════════════════════════════════════════════════════════════════

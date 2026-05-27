@@ -1,0 +1,72 @@
+# NLA datagen — Qwen2.5-7B over Ultra-FineWeb (100k docs).
+# ~1M activation vectors (100k × 10), split 25/25/50 → 250k AO / 250k AR / 500k RL.
+#
+# Ultra-FineWeb is a quality-filtered fineweb subset — higher signal than vanilla fineweb.
+#
+# NOTE: the released checkpoints were trained on a 1B-token Ultra-FineWeb subset
+# that is no longer hosted on the HF Hub. The canonical openbmb/Ultra-FineWeb is
+# multi-TB and stage0 loads non-streaming, so as written this config will pull
+# the full dataset. For a fresh reproduction, prefer configs/datagen/qwen7b_fineweb_1M.yaml
+# (sample-10BT, ~24GB) — or pre-download an Ultra-FineWeb slice locally and point
+# corpus.name at the local path.
+#
+# Run: python -m nla.datagen.run_pipeline --config configs/datagen/qwen7b_ultrafineweb_100k.yaml
+
+base_model: Qwen/Qwen2.5-7B-Instruct
+layer_index: 20
+output_dir: /tmp/nla_qwen7b_ultrafineweb_100k   # or gs://your-bucket/... with a cloud storage backend
+
+corpus:
+  name: openbmb/Ultra-FineWeb
+  config: null
+  split: en
+  text_column: content        # cols = [content, score]
+  start: 0
+  length: 100000
+
+stage0:
+  positions_per_doc: 10
+  chunk_size: 256
+  seed: 42
+  multigpu: true
+  extractor_kwargs: {batch_size: 16, max_length: 4096}
+
+stage1:
+  av_sft_frac: 0.25
+  ar_sft_frac: 0.25
+  rl_frac: 0.50
+  seed: 42
+
+stage2:
+  provider_cls: nla.datagen.providers.AnthropicProvider
+  provider_kwargs:
+    model: claude-sonnet-4-6
+    max_tokens: 300
+    temperature: 1.0
+    concurrency: 100
+  chunk_size: 512
+  # Reuse api_explanation from prior runs' *_explained.parquet — joins on
+  # sha256(detokenized_text_truncated). Same tokenizer + corpus slice → cache
+  # hit even with a different base model. Paths are your registry; add a line
+  # per completed run. 497,060 unique texts from the 7B run — a 14B run on the
+  # same corpus slice would skip ~all API calls.
+  cache_from:
+    - /path/to/prior_run/splits/av_sft_explained.parquet
+    - /path/to/prior_run/splits/ar_sft_explained.parquet
+  cache_storage_cls: nla.datagen.storage.LocalStorage
+
+stage3:
+  keep_debug_metadata: true
+
+shuffle:
+  enabled: true       # breaks position-within-doc clustering from stage0
+  seed: 42
+
+storage_cls: nla.datagen.storage.LocalStorage
+
+# Optional fire-and-forget upload of final *_shuf.parquet + sidecars after
+# pipeline completes. fn is an import path to a callable(files: list[str],
+# subdir: str). Omit this section to skip.
+# upload:
+#   fn: my.module.background_upload
+#   subdir: qwen7b_ultrafineweb_100k_v2

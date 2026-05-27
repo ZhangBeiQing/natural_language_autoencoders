@@ -1,0 +1,81 @@
+diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/entrypoints/http_server.py
+--- a/python/sglang/srt/entrypoints/http_server.py
++++ b/python/sglang/srt/entrypoints/http_server.py
+@@ -1,4 +1,5 @@
+ import asyncio
++import dataclasses as _dataclasses
+ import logging
+ import multiprocessing as multiprocessing
+ import os
+@@ - """Placeholder for the generate handler"""
++# === NLA: fields whitelist for manual GenerateReqInput construction ===
++# Router injects extra keys (e.g. 'model'); dataclass kwargs are strict.
++# Computed once at import so zero per-request cost.
++_GEN_REQ_FIELDS = {f.name for f in _dataclasses.fields(GenerateReqInput)}
++
+@@ -
+-@app.api_route("/generate", methods=["POST", "PUT"])
+-async def generate_request(obj: GenerateReqInput, request: Request):
+-    """Handle a generate request."""
++# === NLA: skip FastAPI's auto-parse-into-dataclass for input_embeds perf ===
++# FastAPI recursively validates obj: GenerateReqInput — for input_embeds
++# (448K floats) that's ~155ms synchronous on the event loop, capping
++# concurrency at ~2. orjson.loads (~30ms) + GenerateReqInput(**data)
++# (dataclass kwarg construction, instant) skips validation entirely.
++# Concurrency unlocked from ~2 to ~16.
++@app.api_route("/generate", methods=["POST", "PUT"])
++async def generate_request(request: Request):
++    """Handle a generate request."""
++    data = orjson.loads(await request.body())
++    obj = GenerateReqInput(**{k: v for k, v in data.items() if k in _GEN_REQ_FIELDS})
+diff --git a/python/sglang/srt/managers/tokenizer_manager.py b/python/sglang/srt/managers/tokenizer_manager.py
+--- a/python/sglang/srt/managers/tokenizer_manager.py
++++ b/python/sglang/srt/managers/tokenizer_manager.py
+@@ - obj.input_embeds handling
+-            input_embeds = obj.input_embeds
++            # === NLA: numpy conversion before pickle ===
++            # Nested list[list[float]] (448K PyFloat objects) → numpy ndarray.
++            # pickle.dumps: 9ms→2.6ms. pickle.loads (sched): 17.5ms→1ms.
++            # torch.tensor (schedule_batch): 83ms→0.1ms (from_numpy zero-copy).
++            import numpy as np
++            input_embeds = np.asarray(obj.input_embeds, dtype=np.float32)
+diff --git a/python/sglang/srt/managers/schedule_batch.py b/python/sglang/srt/managers/schedule_batch.py
+--- a/python/sglang/srt/managers/schedule_batch.py
++++ b/python/sglang/srt/managers/schedule_batch.py
+@@ - if req.input_embeds is not None: comment + extend
+-            if req.input_embeds is not None:
+-                # If req.input_embeds is already a list, append its content directly
+-                input_embeds.extend(req.input_embeds)  # Use extend to avoid nesting
++            if req.input_embeds is not None:
++                # === NLA: append ndarray (from tokenizer_manager), concat later ===
++                input_embeds.append(req.input_embeds)
+@@ - def prepare_for_decode(self):
+     def prepare_for_decode(self):
+         self.forward_mode = ForwardMode.DECODE
++        # === NLA: clear stale embeds before decode ===
++        # prepare_for_extend sets self.input_embeds (line ~1565). Nothing clears
++        # it. running_batch carries the stale tensor through every subsequent
++        # decode; get_model_worker_batch passes it unconditionally. When the
++        # batch's req count later differs from the stale tensor's token count,
++        # model forward sees mismatched shapes (input_embeds vs positions).
++        # Decode never uses prompt embeds — it embeds last_output_id. Clear it.
++        self.input_embeds = None
+         bs = len(self.reqs)
+@@ - self.input_embeds = torch.tensor(...).to(...)
+-        self.input_embeds = (
+-            torch.tensor(input_embeds).to(self.device, non_blocking=True)
+-            if input_embeds
+-            else None
+-        )
++        # === NLA: from_numpy is zero-copy; concatenate is fast for ndarrays ===
++        # torch.tensor(nested_list) was ~83ms for 448K floats; this is ~0.1ms.
++        # Cast to bf16: transport is fp32 (numpy has no bf16), model weights are
++        # bf16, and Gemma's linear kernels strict-check dtype (Qwen's autocast).
++        import numpy as np
++        self.input_embeds = (
++            torch.from_numpy(
++                np.concatenate([np.asarray(e, dtype=np.float32) for e in input_embeds])
++            ).to(self.device, dtype=torch.bfloat16, non_blocking=True)
++            if input_embeds
++            else None
++        )

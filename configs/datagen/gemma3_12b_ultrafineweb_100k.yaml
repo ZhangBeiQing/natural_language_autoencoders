@@ -1,0 +1,47 @@
+# Gemma-3-12B full 100k-doc run. ~1M vectors, ~500k API calls.
+# Same corpus slice as qwen7b_ultrafineweb_100k — but different tokenizer means
+# no stage2 cache reuse from the Qwen run (detokenized_text_truncated differs).
+#
+# Prereq: huggingface-cli login (gemma-3 is gated)
+# Run:    python -m nla.datagen.run_pipeline --config configs/datagen/gemma3_12b_ultrafineweb_100k.yaml
+
+model: gemma12b
+output_dir: /tmp/nla_gemma3_12b_ultrafineweb_100k
+
+corpus:
+  name: openbmb/Ultra-FineWeb   # see qwen7b_ultrafineweb_100k.yaml header re: dataset size
+  config: null
+  split: en
+  text_column: content
+  start: 0
+  length: 100000
+
+stage0:
+  positions_per_doc: 10
+  chunk_size: 256
+  seed: 42
+  multigpu: true
+
+stage1:
+  av_sft_frac: 0.25
+  ar_sft_frac: 0.25
+  rl_frac: 0.50
+  seed: 42
+
+stage2:
+  provider_cls: nla.datagen.providers.AnthropicProvider
+  provider_kwargs:
+    model: claude-sonnet-4-6
+    max_tokens: 300
+    temperature: 1.0
+    concurrency: 100
+  chunk_size: 65536
+
+stage3:
+  keep_debug_metadata: true
+
+shuffle:
+  enabled: true
+  seed: 42
+
+storage_cls: nla.datagen.storage.LocalStorage

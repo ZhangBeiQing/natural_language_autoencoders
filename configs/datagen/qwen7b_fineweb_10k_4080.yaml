@@ -1,0 +1,51 @@
+# NLA datagen pipeline config — Qwen2.5-7B, 1000 fineweb docs, RTX4080 16GB × 4.
+# ~10k activation vectors (1000 docs × 10 positions/doc).
+# Split 25/25/50 → 2500 AV-SFT / 2500 AR-SFT / 5000 RL.
+#
+# Key changes from qwen7b_fineweb_10k.yaml:
+#   - DeepSeekProvider instead of AnthropicProvider
+#   - Reduced batch_size=4, max_length=1024 for 16GB VRAM
+#   - Lower API concurrency for DeepSeek rate limits
+
+base_model: /media/image3a/f/model/Qwen2.5-7B-Instruct
+layer_index: 20
+output_dir: /tmp/nla_qwen7b_fineweb_10k
+
+corpus:
+  name: HuggingFaceFW/fineweb
+  config: sample-10BT
+  split: train
+  text_column: text
+  start: 0
+  length: 1000
+
+stage0:
+  positions_per_doc: 10
+  chunk_size: 256
+  seed: 42
+  multigpu: true
+  extractor_kwargs: {batch_size: 4, max_length: 1024}
+
+stage1:
+  av_sft_frac: 0.25
+  ar_sft_frac: 0.25
+  rl_frac: 0.50
+  seed: 42
+
+stage2:
+  provider_cls: nla.datagen.providers.DeepSeekProvider
+  provider_kwargs:
+    model: deepseek-v4-pro
+    max_tokens: 300
+    concurrency: 50
+    thinking: false
+  chunk_size: 512
+
+stage3:
+  keep_debug_metadata: true
+
+shuffle:
+  enabled: true
+  seed: 42
+
+storage_cls: nla.datagen.storage.LocalStorage

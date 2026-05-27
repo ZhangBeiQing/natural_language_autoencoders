@@ -1,0 +1,54 @@
+# Llama-3.3-70B full 100k-doc run. ~500k API calls.
+# No cache_from (Llama tokenizer ≠ Gemma).
+#
+# Prereq: HF_TOKEN set (llama-3.3 is gated)
+# Multinode stage0: see scripts/datagen/stage0_multinode.sh (DRAFT)
+# Run:    python -m nla.datagen.run_pipeline --config configs/datagen/llama70b_ultrafineweb_100k.yaml
+
+model: llama70b
+base_model: meta-llama/Llama-3.3-70B-Instruct  # or local path if pre-downloaded
+output_dir: /tmp/nla_llama70b_ultrafineweb_100k
+
+corpus:
+  name: openbmb/Ultra-FineWeb   # see qwen7b_ultrafineweb_100k.yaml header re: dataset size
+  config: null
+  split: en
+  text_column: content
+  start: 0
+  length: 100000
+
+stage0:
+  positions_per_doc: 10
+  chunk_size: 256
+  seed: 42
+  # device_map: auto already shards the 70B model across all visible GPUs;
+  # multigpu: true would try to spawn one process per GPU on top of that and OOM.
+  multigpu: false
+  extractor_kwargs:
+    batch_size: 8
+    max_length: 4096
+    device_map: auto
+
+stage1:
+  av_sft_frac: 0.25
+  ar_sft_frac: 0.25
+  rl_frac: 0.50
+  seed: 42
+
+stage2:
+  provider_cls: nla.datagen.providers.AnthropicProvider
+  provider_kwargs:
+    model: claude-sonnet-4-6
+    max_tokens: 300
+    temperature: 1.0
+    concurrency: 100
+  chunk_size: 65536
+
+stage3:
+  keep_debug_metadata: true
+
+shuffle:
+  enabled: true
+  seed: 42
+
+storage_cls: nla.datagen.storage.LocalStorage

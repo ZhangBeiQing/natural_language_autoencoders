@@ -1,0 +1,48 @@
+Fixes: resume4 crash at step 1915 (recurrence of 8250 vs 8192 shape mismatch)
+Status: NLA-specific, not upstreamed
+
+Root cause (CORRECTED — the retract-fix diagnosis was wrong):
+
+  Chunked prefill truncates `fill_ids` and `extend_input_len` when a
+  request's tokens would exceed `chunked_prefill_size`, but it does NOT
+  truncate `req.input_embeds`. prepare_for_extend then appends the FULL
+  embed array, producing an input_embeds tensor larger than out_cache_loc.
+
+  Trigger: ≥66 input_embeds requests (125 tokens each) accumulate in the
+  waiting queue before one scheduler iteration (thundering herd at rollout
+  start after update_weights). Adder packs 65 full reqs (8125 tok) then
+  chunks the 66th to 67 tok. out_cache_loc = 8192, input_embeds = 8250.
+
+  The 58-token delta is NOT preserved output_ids (retract patch was a red
+  herring — retract would give cache_k < loc, our crash is cache_k > loc).
+  It's simply 125 − (8192 mod 125) = 125 − 67 = 58.
+
+Evidence from resume4 log:
+  - Every logged prefill: `#new-seq: 1, #new-token: 125` → single-req batches
+  - KV cache token usage: 0.00 throughout → no memory pressure, no retraction
+  - Crash at first prefill of step 1916's rollout (burst after update_weights)
+  - Crashing batch's log line lost (SIGQUIT before stdout flush)
+
+Fix: slice input_embeds in prepare_for_extend using the same window that
+fill_ids was sliced to. pre_len = len(prefix_indices) (how many embed rows
+already processed in prior chunks), extend_input_len = this chunk's budget.
+For non-chunked reqs this is a no-op slice [0:full_len].
+
+Also covers: set_finish_with_abort (origin_input_ids=[0] but embeds intact),
+chunk continuation (prefix_indices tracks prior chunk, slice [67:125]).
+
+--- a/python/sglang/srt/managers/schedule_batch.py
++++ b/python/sglang/srt/managers/schedule_batch.py
+@@ - prepare_for_extend: input_embeds append
+-            if req.input_embeds is not None:
+-                # === NLA: append ndarray (from tokenizer_manager), concat later ===
+-                input_embeds.append(req.input_embeds)
++            if req.input_embeds is not None:
++                # === NLA: append ndarray (from tokenizer_manager), concat later ===
++                # Slice to match chunked-prefill truncation of fill_ids.
++                # pre_len = len(prefix_indices) = rows consumed in prior chunks.
++                # req.extend_input_len = this chunk's token budget (adder-truncated).
++                # Non-chunked case: pre_len=0, extend_input_len=len(embeds) → full slice.
++                input_embeds.append(
++                    req.input_embeds[pre_len : pre_len + req.extend_input_len]
++                )

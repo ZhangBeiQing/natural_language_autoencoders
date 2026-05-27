@@ -1,0 +1,41 @@
+From: https://github.com/sgl-project/sglang/pull/14110
+Fixes: https://github.com/sgl-project/sglang/issues/14109
+Status: merged upstream 2026-03-11; retained for older sglang checkouts and
+because this version additionally clears the logprob accumulators.
+
+Root cause: when a request using input_embeds gets retracted (KV cache full)
+and re-prefilled, reset_for_retract preserves output_ids. Scheduler then
+allocates KV slots for len(input_embeds)+len(output_ids) but model forward
+only processes input_embeds → shape mismatch in set_kv_buffer.
+
+Our crash at RL step ~406 after 20.5h:
+  RuntimeError: shape mismatch: value tensor of shape [8250, 4, 128] cannot be
+  broadcast to indexing result of shape [8192, 4, 128]
+58 tokens = accumulated output_ids on retracted req.
+
+--- a/python/sglang/srt/managers/schedule_batch.py
++++ b/python/sglang/srt/managers/schedule_batch.py
+@@ - reset_for_retract tail
+         self.kv_committed_freed = False
+         self.kv_overallocated_freed = False
+
++        # Upstream PR #14110: input_embeds reqs can't mix original embeddings
++        # with output token IDs on re-prefill. Keeping output_ids → scheduler
++        # allocates len(embeds)+len(output_ids) KV slots but model only fills
++        # len(embeds) → shape mismatch. Discard progress, restart from zero.
++        # The logprob accumulators are append-only on Req — keeping output_ids'
++        # stale logprobs while restarting decode from zero contaminates
++        # output_token_logprobs with pre-retraction entries. 27b hit this
++        # (~4% of samples under KV pressure; Qwen-7B never retracts so clean).
++        if self.input_embeds is not None:
++            self.output_ids = []
++            if self.return_logprob:
++                self.output_token_logprobs_val = []
++                self.output_token_logprobs_idx = []
++                self.output_top_logprobs_val = []
++                self.output_top_logprobs_idx = []
++                self.output_token_ids_logprobs_val = []
++                self.output_token_ids_logprobs_idx = []
++            self.hidden_states = []
++
+     def offload_kv_cache(self, req_to_token_pool, token_to_kv_pool_allocator):
