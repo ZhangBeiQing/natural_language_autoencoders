@@ -14,6 +14,8 @@ chunk's API calls. At the end, chunks are concatenated into the output.
 """
 
 import argparse
+import hashlib
+import json
 import re
 from dataclasses import replace
 from pathlib import Path
@@ -45,10 +47,12 @@ Feature types to consider (as inspiration, not a rigid checklist):
 
 The final feature must describe the very end of the presented sequence: its role, what it's part of, and immediate constraints on what follows.
 
-Format — IMPORTANT: keep to ~80-100 words total and ALWAYS close the tag:
+Format — IMPORTANT: keep to ~80-100 words total, put a blank line between each feature, and ALWAYS close the tag:
 <analysis>
 [first feature — include specific examples when relevant]
+
 [second feature]
+
 [final feature: the last token, its role, immediate constraints]
 </analysis>
 
@@ -78,6 +82,32 @@ _LIST_PREFIX_RE = re.compile(
     r")\s+"
 )
 _BOLD_WRAP_RE = re.compile(r"^\*\*(.+?)\*\*\s*")
+_INLINE_FEATURE_HEADER_RE = re.compile(
+    r"\s+(?=("
+    r"Second"
+    r"|Final feature"
+    r"|Final token"
+    r"|Final word"
+    r"|The final (?:token|word)"
+    r"|Immediate syntactic constraint"
+    r"|Semantic topic continuation"
+    r"|Semantic expectation"
+    r"|Syntactic expectation"
+    r"|Syntactic/structural (?:constraint|constraints)"
+    r"|Immediate semantic expectations?"
+    r"|Stylistic/register(?: patterns?)?"
+    r"|Narrative/argumentative momentum"
+    r"|Domain/genre signals?"
+    r"|Repetition/continuation patterns?"
+    r")\s*:)",
+    flags=re.IGNORECASE,
+)
+_INLINE_ORDINAL_RE = re.compile(r"\s+(?=(?:Second|Third|Finally),)", flags=re.IGNORECASE)
+_INLINE_FINAL_PHRASE_RE = re.compile(
+    r"\s+(?=(?:Semantic expectation|The final token|The final word)\b)",
+    flags=re.IGNORECASE,
+)
+_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"`])")
 
 
 def _extract_and_clean(raw: str, pattern: str) -> str | None:
@@ -88,7 +118,9 @@ def _extract_and_clean(raw: str, pattern: str) -> str | None:
     m = re.search(pattern, raw, flags=re.DOTALL)
     if m is None:
         return None
-    content = m.group(1)
+    content = _INLINE_FEATURE_HEADER_RE.sub("\n", m.group(1))
+    content = _INLINE_ORDINAL_RE.sub("\n", content)
+    content = _INLINE_FINAL_PHRASE_RE.sub("\n", content)
 
     cleaned: list[str] = []
     for line in content.split("\n"):
@@ -97,6 +129,10 @@ def _extract_and_clean(raw: str, pattern: str) -> str | None:
         line = line.strip().strip("*_")  # trailing emphasis markers
         if line:
             cleaned.append(line)
+    if len(cleaned) == 1:
+        sentences = [s.strip() for s in _SENTENCE_BOUNDARY_RE.split(cleaned[0]) if s.strip()]
+        if len(sentences) >= _MIN_FEATURES:
+            cleaned = sentences
     return "\n\n".join(cleaned)
 
 
@@ -113,6 +149,9 @@ def main() -> None:
                         "Default requires both <analysis> and </analysis> (truncated "
                         "responses are dropped). MUST match the tag your instruction asks for.")
     p.add_argument("--chunk-size", type=int, default=512, help="rows per provider.complete() call")
+    p.add_argument("--bad-response-log", default=None,
+                   help="local JSONL path for rows dropped due to provider/format failures. "
+                        "Default: {output}.bad_responses.jsonl")
     p.add_argument("--cache-from", action="append", default=[],
                    help="path(s) to existing *_explained.parquet to reuse explanations from "
                         "(joins on detokenized_text_truncated — same tokenizer + corpus slice "
@@ -134,6 +173,8 @@ def main() -> None:
     table = pq.read_table(storage.open_read(args.input))
     out_schema = table.schema.append(pa.field("api_explanation", pa.string()))
     storage.ensure_parent(args.output)
+    bad_response_log = Path(args.bad_response_log or f"{args.output}.bad_responses.jsonl")
+    bad_response_log.parent.mkdir(parents=True, exist_ok=True)
 
     # Per-chunk files for crash-safe resumption. Local-only (not via storage
     # backend — these are temp files). Existing chunk files are skipped on
@@ -141,8 +182,13 @@ def main() -> None:
     chunks_dir = Path(f"{args.output}.chunks")
     chunks_dir.mkdir(parents=True, exist_ok=True)
 
-    def _process_chunk(chunk: pa.Table) -> tuple[pa.Table, int]:
+    def _log_bad_response(record: dict) -> None:
+        with bad_response_log.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _process_chunk(chunk: pa.Table, chunk_start: int) -> tuple[pa.Table, int]:
         texts = chunk.column("detokenized_text_truncated").to_pylist()
+        doc_ids = chunk.column("doc_id").to_pylist() if "doc_id" in chunk.column_names else [None] * len(texts)
         cached_expls = [lookup(cache, t) for t in texts]
         miss_idx = [i for i, e in enumerate(cached_expls) if e is None]
         miss_prompts = [args.instruction_template.format(text=texts[i]) for i in miss_idx]
@@ -157,12 +203,37 @@ def main() -> None:
             # Drop it (same path as failed-extract-pattern below).
             if raw is None:
                 miss_cleaned[j] = None
+                _log_bad_response({
+                    "chunk_start": chunk_start,
+                    "row_in_chunk": j,
+                    "global_row": chunk_start + j,
+                    "doc_id": doc_ids[j],
+                    "text_sha256": hashlib.sha256(texts[j].encode("utf-8")).hexdigest(),
+                    "reason": "provider_returned_none",
+                    "raw_response": None,
+                    "cleaned": None,
+                    "feature_count": 0,
+                })
                 continue
             assert isinstance(raw, str) and raw, (
                 f"provider returned bad completion at miss index {j}: {raw!r}. "
                 f"CompletionProvider.complete() must return str or None."
             )
-            miss_cleaned[j] = _extract_and_clean(raw, args.response_extract_pattern)
+            cleaned = _extract_and_clean(raw, args.response_extract_pattern)
+            miss_cleaned[j] = cleaned
+            feature_count = 0 if cleaned is None else cleaned.count("\n\n") + 1
+            if cleaned is None or feature_count < _MIN_FEATURES:
+                _log_bad_response({
+                    "chunk_start": chunk_start,
+                    "row_in_chunk": j,
+                    "global_row": chunk_start + j,
+                    "doc_id": doc_ids[j],
+                    "text_sha256": hashlib.sha256(texts[j].encode("utf-8")).hexdigest(),
+                    "reason": "extract_failed" if cleaned is None else "too_few_features",
+                    "raw_response": raw,
+                    "cleaned": cleaned,
+                    "feature_count": feature_count,
+                })
 
         dropped = 0
         keep_mask: list[bool] = []
@@ -189,8 +260,10 @@ def main() -> None:
         if chunk_path.exists():
             skipped += 1
             continue
-        chunk_out, dropped = _process_chunk(table.slice(chunk_start, args.chunk_size))
+        chunk_out, dropped = _process_chunk(table.slice(chunk_start, args.chunk_size), chunk_start)
         dropped_count += dropped
+        if dropped:
+            print(f"  chunk {chunk_start}: dropped {dropped} rows; see {bad_response_log}", flush=True)
         # tmp+rename: no partial chunk file if the process dies mid-write
         tmp = chunk_path.with_suffix(".tmp")
         pq.write_table(chunk_out, tmp)

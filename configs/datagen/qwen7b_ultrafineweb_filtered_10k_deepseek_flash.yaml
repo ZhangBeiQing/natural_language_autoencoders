@@ -1,0 +1,51 @@
+# NLA datagen pipeline config — Qwen2.5-7B over filtered 10k-doc Ultra-FineWeb.
+# Stage 2 uses DeepSeek flash for high-throughput API explanations.
+#
+# Run:
+#   python -m nla.datagen.run_pipeline --config configs/datagen/qwen7b_ultrafineweb_filtered_10k_deepseek_flash.yaml --stages 2
+
+base_model: /home/image3a/306920/model/Qwen2.5-7B-Instruct
+layer_index: 20
+output_dir: /tmp/nla_qwen7b_ultrafineweb_filtered_10k
+
+corpus:
+  name: /tmp/nla_qwen7b_ultrafineweb_filtered_10k/ultrafineweb_filtered_0_10000.parquet
+  config:
+  split: en
+  text_column: content
+  start: 0
+  length: 10000
+
+stage0:
+  positions_per_doc: 10
+  chunk_size: 256
+  seed: 42
+  multigpu: true
+  extractor_kwargs: {batch_size: 1, max_length: 2048}
+
+stage1:
+  av_sft_frac: 0.25
+  ar_sft_frac: 0.25
+  rl_frac: 0.50
+  seed: 42
+
+stage2:
+  provider_cls: nla.datagen.providers.DeepSeekProvider
+  provider_kwargs:
+    model: deepseek-v4-flash
+    max_tokens: 600
+    temperature: 1.0
+    concurrency: 512
+    max_retries: 3
+    timeout: 120
+    thinking: false
+  chunk_size: 512
+
+stage3:
+  keep_debug_metadata: true
+
+shuffle:
+  enabled: true
+  seed: 42
+
+storage_cls: nla.datagen.storage.LocalStorage

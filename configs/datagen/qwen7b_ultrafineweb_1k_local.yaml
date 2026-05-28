@@ -1,0 +1,49 @@
+# NLA datagen pipeline config — Qwen2.5-7B over a filtered local 1000-doc Ultra-FineWeb slice.
+# Produces ~10k activation vectors (1000 docs × 10 positions/doc).
+#
+# Run:
+#   python -m nla.datagen.run_pipeline --config configs/datagen/qwen7b_ultrafineweb_1k_local.yaml --stages 0,1
+
+base_model: /home/image3a/306920/model/Qwen2.5-7B-Instruct
+layer_index: 20
+output_dir: /tmp/nla_qwen7b_ultrafineweb_filtered_1k
+
+corpus:
+  name: /tmp/nla_qwen7b_ultrafineweb_filtered_1k/ultrafineweb_filtered_0_1000.parquet
+  config:
+  split: en
+  text_column: content
+  start: 0
+  length: 1000
+
+stage0:
+  positions_per_doc: 10
+  chunk_size: 256
+  seed: 42
+  multigpu: true
+  extractor_kwargs: {batch_size: 1, max_length: 2048}
+
+stage1:
+  av_sft_frac: 0.25
+  ar_sft_frac: 0.25
+  rl_frac: 0.50
+  seed: 42
+
+stage2:
+  provider_cls: nla.datagen.providers.MiMoProvider
+  provider_kwargs:
+    model: mimo-v2.5-pro
+    max_tokens: 600
+    concurrency: 20
+    rpm: 90
+    thinking: false
+  chunk_size: 128
+
+stage3:
+  keep_debug_metadata: true
+
+shuffle:
+  enabled: true
+  seed: 42
+
+storage_cls: nla.datagen.storage.LocalStorage

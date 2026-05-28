@@ -183,6 +183,8 @@ class OpenAIChatProvider(CompletionProvider):
         max_retries: int = 10,
         timeout: float = 120.0,
         extra_body: dict | None = None,
+        abort_on_error: bool = True,
+        rpm: int | None = None,
     ):
         from openai import AsyncOpenAI
 
@@ -202,9 +204,29 @@ class OpenAIChatProvider(CompletionProvider):
         self.temperature = temperature
         self.concurrency = concurrency
         self.extra_body = extra_body or {}
+        self.abort_on_error = abort_on_error
+        self.rpm = rpm
+        self._min_request_interval = 0.0 if rpm is None or rpm <= 0 else 60.0 / rpm
+        self._rate_lock: asyncio.Lock | None = None
+        self._next_request_at = 0.0
+
+    async def _throttle(self) -> None:
+        if self._min_request_interval <= 0:
+            return
+        if self._rate_lock is None:
+            self._rate_lock = asyncio.Lock()
+        async with self._rate_lock:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            wait = self._next_request_at - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+                now = loop.time()
+            self._next_request_at = max(now, self._next_request_at) + self._min_request_interval
 
     async def _one(self, sem: asyncio.Semaphore, prompt: str) -> str | None:
         async with sem:
+            await self._throttle()
             resp = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
@@ -248,6 +270,14 @@ class OpenAIChatProvider(CompletionProvider):
                 raise r
             else:
                 raise AssertionError(f"gather returned unexpected type at [{i}]: {type(r).__name__}")
+        if self.abort_on_error and n_failed:
+            failed_types = sorted({type(r).__name__ for r in raw if isinstance(r, tolerated)})
+            raise RuntimeError(
+                f"{type(self).__name__} got {n_failed}/{len(prompts)} retry-exhausted API errors "
+                f"({', '.join(failed_types)}). Aborting this Stage 2 chunk without writing it; "
+                "completed chunk files remain resumable. Refill quota or fix the transient issue, "
+                "then rerun the same Stage 2 command."
+            )
         if n_failed or n_refused:
             print(
                 f"  [{type(self).__name__}] dropped "
@@ -284,6 +314,8 @@ class DeepSeekProvider(OpenAIChatProvider):
         api_base: str | None = None,
         api_key: str | None = None,
         timeout: float = 120.0,
+        abort_on_error: bool = True,
+        rpm: int | None = None,
     ):
         extra_body = {"thinking": {"type": "enabled" if thinking else "disabled"}}
         super().__init__(
@@ -297,6 +329,8 @@ class DeepSeekProvider(OpenAIChatProvider):
             concurrency=concurrency,
             max_retries=max_retries,
             timeout=timeout,
+            abort_on_error=abort_on_error,
+            rpm=rpm,
             extra_body=extra_body,
         )
 
@@ -315,6 +349,8 @@ class MiMoProvider(OpenAIChatProvider):
         api_key: str | None = None,
         api_base: str | None = None,
         timeout: float = 120.0,
+        abort_on_error: bool = True,
+        rpm: int | None = None,
     ):
         extra_body = {"thinking": {"type": "enabled" if thinking else "disabled"}}
         super().__init__(
@@ -328,5 +364,7 @@ class MiMoProvider(OpenAIChatProvider):
             concurrency=concurrency,
             max_retries=max_retries,
             timeout=timeout,
+            abort_on_error=abort_on_error,
+            rpm=rpm,
             extra_body=extra_body,
         )

@@ -200,28 +200,3 @@ license of their base model (Gemma, Llama-3.3) — see the NOTICE files in each
 HF repo.
 
 
- cd /home/image3a/306920/program/natural_language_autoencoders-main
-  source /home/image3a/306920/venv/nla/bin/activate
-
-  export HF_ENDPOINT=https://hf-mirror.com
-  export HF_HOME=/home/image3a/306920/hf_cache
-  export HF_DATASETS_CACHE=/home/image3a/306920/hf_cache/datasets
-  export HF_HUB_CACHE=/home/image3a/306920/hf_cache/hub
-  export HF_HUB_ETAG_TIMEOUT=300
-  export HF_HUB_DOWNLOAD_TIMEOUT=3600
-
-  STAGE0_MONITOR_INTERVAL=30 python -m nla.datagen.run_pipeline \
-    --config configs/datagen/qwen7b_fineweb_10k.yaml \
-    --stages 0,1
-
-
-
-你怎么就不明白呢？我的网络不稳定！！！你不要让我一上来就跑
-  STAGE0_MONITOR_INTERVAL=30 python -m nla.datagen.run_pipeline \
-    --config configs/datagen/qwen7b_fineweb_10k.yaml \
-    --stages 0,1
-  你怎么知道它不会有其他问题？先把要用的数据集下载下来，怎么这么蠢
-
-  的命令补救行来吗？大哥，先把数据下载下来啊
-
-帮我把当前所有代码都提交一下，然后传到我的github里去，我的github地址是：https://github.com/ZhangBeiQing/natural_language_autoencoders

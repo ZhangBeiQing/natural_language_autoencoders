@@ -7,19 +7,20 @@ file in the datagen config.
 
 import argparse
 import time
+from itertools import islice
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from datasets import Dataset, load_dataset
+from datasets import load_dataset, load_dataset_builder
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--corpus", required=True)
     p.add_argument("--corpus-config", default=None)
-    p.add_argument("--corpus-split", default="train")
-    p.add_argument("--text-column", default="text")
+    p.add_argument("--corpus-split", default=None)
+    p.add_argument("--text-column", default=None)
     p.add_argument("--start", type=int, default=0)
     p.add_argument("--length", type=int, required=True)
     p.add_argument("--output", required=True)
@@ -27,7 +28,26 @@ def main() -> None:
     p.add_argument("--retry-sleep", type=float, default=30.0)
     args = p.parse_args()
 
-    split_expr = f"{args.corpus_split}[{args.start}:{args.start + args.length}]"
+    corpus_name = args.corpus.rstrip("/").lower()
+    if corpus_name == "openbmb/ultra-fineweb":
+        if args.corpus_split is None:
+            args.corpus_split = "en"
+        if args.text_column is None:
+            args.text_column = "content"
+    else:
+        if args.corpus_split is None:
+            args.corpus_split = "train"
+        if args.text_column is None:
+            args.text_column = "text"
+
+    builder = load_dataset_builder(args.corpus, name=args.corpus_config)
+    if builder.info.splits and args.corpus_split not in builder.info.splits:
+        available = ", ".join(builder.info.splits)
+        raise SystemExit(f"split {args.corpus_split!r} not found; available splits: {available}")
+    if builder.info.features and args.text_column not in builder.info.features:
+        available = ", ".join(builder.info.features)
+        raise SystemExit(f"text column {args.text_column!r} not found; available columns: {available}")
+
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -35,13 +55,17 @@ def main() -> None:
     for attempt in range(1, args.retries + 1):
         print(
             f"[predownload] attempt {attempt}/{args.retries}: "
-            f"{args.corpus} config={args.corpus_config or '-'} split={split_expr}",
+            f"{args.corpus} config={args.corpus_config or '-'} split={args.corpus_split} "
+            f"start={args.start} length={args.length} text_column={args.text_column}",
             flush=True,
         )
         try:
-            ds = load_dataset(args.corpus, name=args.corpus_config, split=split_expr)
-            assert isinstance(ds, Dataset), f"expected Dataset, got {type(ds).__name__}"
-            texts = ds[args.text_column]
+            ds = load_dataset(args.corpus, name=args.corpus_config, split=args.corpus_split, streaming=True)
+            texts = []
+            for row_idx, row in enumerate(islice(ds, args.start, args.start + args.length), start=1):
+                texts.append(row[args.text_column])
+                if row_idx == 1 or row_idx % 100 == 0 or row_idx == args.length:
+                    print(f"[predownload] streamed {row_idx}/{args.length} rows", flush=True)
             assert len(texts) == args.length, f"expected {args.length} rows, got {len(texts)}"
             tmp = output.with_suffix(output.suffix + ".tmp")
             pq.write_table(pa.table({args.text_column: pa.array(texts, type=pa.string())}), tmp)
