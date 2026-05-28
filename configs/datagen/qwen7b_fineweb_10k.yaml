@@ -33,7 +33,7 @@ stage2:
   provider_cls: nla.datagen.providers.MiMoProvider
   provider_kwargs:
     model: mimo-v2.5-pro
-    max_tokens: 300
+    max_tokens: 600
     concurrency: 50
     thinking: false
   chunk_size: 512
