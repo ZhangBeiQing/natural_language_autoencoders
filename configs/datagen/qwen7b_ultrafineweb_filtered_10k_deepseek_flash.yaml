@@ -35,7 +35,7 @@ stage2:
     model: deepseek-v4-flash
     max_tokens: 600
     temperature: 1.0
-    concurrency: 512
+    concurrency: 2500
     max_retries: 3
     timeout: 120
     thinking: false

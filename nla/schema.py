@@ -222,6 +222,10 @@ def compute_canonical_neighbors(
         tokenize=True,
         add_generation_prompt=True,
     )
+    if hasattr(ids, "keys"):
+        ids = ids["input_ids"]
+    if hasattr(ids, "tolist"):
+        ids = ids.tolist()
     matches = [i for i, tid in enumerate(ids) if tid == injection_token_id]
     assert len(matches) == 1, (
         f"injection token id {injection_token_id} ({injection_char!r}) appears "
