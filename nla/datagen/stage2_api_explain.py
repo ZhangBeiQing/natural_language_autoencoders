@@ -27,43 +27,29 @@ from nla.datagen.prompt_cache import load_explanation_cache, lookup
 from nla.datagen.providers import CompletionProvider
 from nla.datagen.sidecar import NLAApiSummaryMeta, read_sidecar, write_sidecar
 
-# Instruction prompt from the paper appendix, with the open-model modification:
-# request "2-3" features rather than "4-5" so outputs average about 130 tokens.
-# Keep the closing tag strict; truncated responses are dropped.
+# Instruction prompt adapted from the prompt template in the appendix — the proven
+# NLA prompt. Shortened from 4-5 → 2-3 features and ~100 word budget so
+# responses reliably fit in the token budget WITH closing tag (truncated
+# responses fail the extract pattern and get dropped).
 _DEFAULT_INSTRUCTION = """A language model needs to predict what text comes next after a snippet which will be presented to you shortly. Identify the 2-3 most important features it would use for this prediction.
-Focus on what the language model must be "thinking about" at the point where the provided text ends. You should not need reference the fact that the text is truncated/incomplete/a prefix: the language model is causal, so only sees the prefix to what it predicts and this is implicit.
-Order features by what is most important for predicting the next tokens.
-Each feature should consist of a ~5-15 word description. When describing patterns, feel free to:
-
-Note when patterns repeat, mirror, or continue from earlier in the text
-Show how the same pattern manifests in multiple forms
-Use probabilistic language ("often", "typically", etc.) when the model faces uncertainty
-Feel free to include specific - and relevant - textual examples inline.
-Track both what tokens are expected AND what contextual patterns determine those expectations
+Focus on what the language model must be "thinking about" at the point where the provided text ends. You should not need to reference the fact that the text is truncated/incomplete/a prefix: the language model is causal, so only sees the prefix to what it predicts and this is implicit.
+Order features by what is most important for predicting the next tokens. Each feature should consist of a concise ~10-20 word description. Feel free to include specific textual examples inline.
 
 Feature types to consider (as inspiration, not a rigid checklist):
+- Syntactic/structural constraints: "unclosed parenthesis requires matching close"
+- Immediate semantic expectations: "list promised three items but only two given"
+- Stylistic/register patterns: "formal academic tone maintained throughout"
+- Narrative/argumentative momentum: "thesis stated, supporting evidence now expected"
+- Domain/genre signals: "medical case history following SOAP format"
+- Repetition/continuation patterns: "same phrase structure repeating with variations"
 
-Syntactic/structural constraints: "unclosed parenthesis from line 3 requires matching closing parenthesis before statement ends"
-Immediate semantic expectations: "list promised three items but only two given, third item now required"
-Stylistic/register patterns: "formal academic tone maintained throughout using passive voice and latinate vocabulary"
-Narrative/argumentative momentum: "thesis statement just completed, supporting evidence or first counterargument now expected"
-Logical/causal dependencies: "causal premise about market conditions established, economic consequence must now follow"
-Domain/genre signals: "medical case history following standard SOAP format, now in Assessment section"
-Discourse/dialogue context: "speaker interrupted mid-sentence during heated argument, continuation of same thought expected"
-Repetition/continuation patterns: "same prepositional phrase structure repeating with variations like 'from a X perspective'"
-Distributional expectations: "verb ending in -ing typically followed by noun phrase in this technical documentation style"
-Epistemic/meta-textual stance: "hedging language with 'may' and 'possibly' showing continued uncertainty about empirical claims"
+The final feature must describe the very end of the presented sequence: its role, what it's part of, and immediate constraints on what follows.
 
-Additionally:
-If the text contains H: and A: markers, these indicate dialogue turns between a human and an assistant in a chat transcript.
-The final feature in your explanation must describe the very end of the presented sequence: its role, what it's part of, what it implies, and how it relates to patterns established earlier, as appropriate.
-Be specific and precise. Consider how the model tracks patterns across multiple levels simultaneously-surface forms, semantic content, genre conventions, and sequential dependencies. Features can describe both immediate next-token constraints and longer-range structural expectations.
-
-Format (use up to 150-200 words total, exactly 2 or 3 features, no more):
+Format — IMPORTANT: keep to ~80-100 words total and ALWAYS close the tag:
 <analysis>
-[first feature—include specific examples from text when relevant]
+[first feature — include specific examples when relevant]
 [second feature]
-[optional third/final feature: analysis of last token, its role, and immediate constraints]
+[final feature: the last token, its role, immediate constraints]
 </analysis>
 
 Text to analyze:
