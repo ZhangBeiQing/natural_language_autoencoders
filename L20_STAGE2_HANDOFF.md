@@ -1,179 +1,163 @@
-# L20 Stage 2 Handoff
+# L20 Training Handoff
 
-This document is for the AI/operator on the 8xL20 server. The goal is to finish Stage 2 explanations for the filtered Ultra-FineWeb 10k run, then build final NLA training parquets.
+This handoff is for the AI/operator on the 8xL20 training server. Stage 2 API
+explanation generation has already been completed with DeepSeek; do not build a
+local inference service or call DeepSeek again unless explicitly asked.
 
-## Current Status
+## Goal
 
-Stage 0 and Stage 1 are already complete on the source server for the 10k filtered Ultra-FineWeb run:
+Run the full NLA training path once on the 10k filtered Ultra-FineWeb dataset:
+
+1. Critic SFT on AR data.
+2. Actor SFT on AV data.
+3. RL using the actor and critic checkpoints.
+
+This is a 10k smoke/midscale run to validate the training stack, not the final
+100k production dataset.
+
+## Required Data
+
+Copy these six files to the training server. The three sidecars are required;
+the parquet files alone are not enough.
 
 ```text
-output_dir: /tmp/nla_qwen7b_ultrafineweb_filtered_10k
-base:      100000 rows, 10000 docs
-av_sft:     25000 rows, 2500 docs
-ar_sft:     25000 rows, 2500 docs
-rl:         50000 rows, 5000 docs
-d_model: 3584
-layer: 20
-base_model: /home/image3a/306920/model/Qwen2.5-7B-Instruct
+/home/image3a/306920/dataset/nla_qwen7b_ultrafineweb_filtered_10k/av_sft_shuf.parquet
+/home/image3a/306920/dataset/nla_qwen7b_ultrafineweb_filtered_10k/av_sft_shuf.parquet.nla_meta.yaml
+/home/image3a/306920/dataset/nla_qwen7b_ultrafineweb_filtered_10k/ar_sft_shuf.parquet
+/home/image3a/306920/dataset/nla_qwen7b_ultrafineweb_filtered_10k/ar_sft_shuf.parquet.nla_meta.yaml
+/home/image3a/306920/dataset/nla_qwen7b_ultrafineweb_filtered_10k/rl_shuf.parquet
+/home/image3a/306920/dataset/nla_qwen7b_ultrafineweb_filtered_10k/rl_shuf.parquet.nla_meta.yaml
 ```
 
-Required files to copy to the L20 server:
+Recommended destination:
+
+```bash
+export DATA_DIR=/home/image3a/306920/dataset/nla_qwen7b_ultrafineweb_filtered_10k
+```
+
+Expected row counts:
 
 ```text
-/tmp/nla_qwen7b_ultrafineweb_filtered_10k/splits/av_sft_raw.parquet
-/tmp/nla_qwen7b_ultrafineweb_filtered_10k/splits/av_sft_raw.parquet.nla_meta.yaml
-/tmp/nla_qwen7b_ultrafineweb_filtered_10k/splits/ar_sft_raw.parquet
-/tmp/nla_qwen7b_ultrafineweb_filtered_10k/splits/ar_sft_raw.parquet.nla_meta.yaml
-/tmp/nla_qwen7b_ultrafineweb_filtered_10k/splits/rl_raw.parquet
-/tmp/nla_qwen7b_ultrafineweb_filtered_10k/splits/rl_raw.parquet.nla_meta.yaml
+av_sft_shuf.parquet: 24975 rows
+ar_sft_shuf.parquet: 24979 rows
+rl_shuf.parquet:     50000 rows
 ```
 
-Keep the same directory layout on the L20 server if possible. If paths differ, update the config `output_dir` and use the copied split paths directly when running stage CLIs.
+Optional audit files are under `splits/*.bad_responses.jsonl`; they are not
+needed for training.
 
-## Code Changes To Use
+## Code And Model Requirements
 
-Use the latest pushed repo. Important additions:
-
-- `nla.datagen.providers.OpenAIChatProvider` supports OpenAI-compatible APIs, bounded async concurrency, optional `rpm`, and fail-fast behavior.
-- `nla.datagen.providers.DeepSeekProvider` supports `deepseek-v4-flash` with thinking disabled.
-- `nla.datagen.stage2_api_explain` writes dropped bad responses to `{output}.bad_responses.jsonl`.
-- Stage 2 is chunk-resumable. Completed `*.parquet.chunks/chunk_*.parquet` files are reused on rerun.
-- `nla.datagen.benchmark_provider_concurrency` benchmarks provider throughput on real Stage 2 prompts.
-
-Do not delete `.chunks` directories after a failure. Rerun the same command to continue.
-
-## Option A: DeepSeek Flash Stage 2
-
-Use this if paid API cost is acceptable and speed matters.
+Use repo commit `90b3c3c` or newer. Activate the project environment:
 
 ```bash
 source /home/image3a/306920/venv/nla/bin/activate
-
-python -m nla.datagen.run_pipeline \
-  --config configs/datagen/qwen7b_ultrafineweb_filtered_10k_deepseek_flash.yaml \
-  --stages 2
 ```
 
-Current tested settings:
-
-```yaml
-provider_cls: nla.datagen.providers.DeepSeekProvider
-model: deepseek-v4-flash
-concurrency: 512
-chunk_size: 512
-max_tokens: 600
-thinking: false
-```
-
-Benchmark on 512 real prompts: `512/512` passed after current cleaner, about `12s`.
-
-Bad-format logs, if any:
-
-```text
-/tmp/nla_qwen7b_ultrafineweb_filtered_10k/splits/av_sft_explained.parquet.bad_responses.jsonl
-/tmp/nla_qwen7b_ultrafineweb_filtered_10k/splits/ar_sft_explained.parquet.bad_responses.jsonl
-```
-
-## Option B: Local 32B Model Stage 2
-
-Use this to avoid API cost. Start an OpenAI-compatible server with Qwen2.5-32B-Instruct.
-
-Example vLLM server:
+The sidecars were generated against:
 
 ```bash
-vllm serve /path/to/Qwen2.5-32B-Instruct \
-  --tensor-parallel-size 8 \
-  --dtype bfloat16 \
-  --max-model-len 4096 \
-  --gpu-memory-utilization 0.90 \
-  --port 8000
+export INSTRUCT_MODEL=/home/image3a/306920/model/Qwen2.5-7B-Instruct
 ```
 
-First benchmark real prompts:
+If the model lives elsewhere on the L20 server, either set `INSTRUCT_MODEL` to
+that path or create a symlink at the path above. Do not edit the parquet files or
+sidecars. The Qwen injection token is `㈎` with token id `149705`.
+
+## Sanity Check
+
+Run this before training:
 
 ```bash
-source /home/image3a/306920/venv/nla/bin/activate
+python - <<'PY'
+from pathlib import Path
+import pyarrow.parquet as pq
 
-python -m nla.datagen.benchmark_provider_concurrency \
-  --input /tmp/nla_qwen7b_ultrafineweb_filtered_10k/splits/av_sft_raw.parquet \
-  --rows 512 \
-  --concurrency 256 \
-  --provider-cls nla.datagen.providers.OpenAIChatProvider \
-  --provider-kwargs '{"model":"/path/to/Qwen2.5-32B-Instruct","api_base":"http://127.0.0.1:8000/v1","api_key":"dummy","max_tokens":600,"temperature":1.0,"max_retries":3,"timeout":600}'
+data = Path("/home/image3a/306920/dataset/nla_qwen7b_ultrafineweb_filtered_10k")
+for name in ["av_sft_shuf.parquet", "ar_sft_shuf.parquet", "rl_shuf.parquet"]:
+    p = data / name
+    sidecar = Path(str(p) + ".nla_meta.yaml")
+    print(name, pq.ParquetFile(p).metadata.num_rows, "sidecar=", sidecar.exists())
+PY
 ```
 
-If the benchmark is stable, run Stage 2 manually for AV and AR:
+Also run a quick syntax check after pulling the latest code:
 
 ```bash
-python -m nla.datagen.stage2_api_explain \
-  --input /tmp/nla_qwen7b_ultrafineweb_filtered_10k/splits/av_sft_raw.parquet \
-  --output /tmp/nla_qwen7b_ultrafineweb_filtered_10k/splits/av_sft_explained.parquet \
-  --provider-cls nla.datagen.providers.OpenAIChatProvider \
-  --provider-kwargs '{"model":"/path/to/Qwen2.5-32B-Instruct","api_base":"http://127.0.0.1:8000/v1","api_key":"dummy","max_tokens":600,"temperature":1.0,"concurrency":256,"max_retries":3,"timeout":600}' \
-  --chunk-size 512 \
-  --storage-cls nla.datagen.storage.LocalStorage
-
-python -m nla.datagen.stage2_api_explain \
-  --input /tmp/nla_qwen7b_ultrafineweb_filtered_10k/splits/ar_sft_raw.parquet \
-  --output /tmp/nla_qwen7b_ultrafineweb_filtered_10k/splits/ar_sft_explained.parquet \
-  --provider-cls nla.datagen.providers.OpenAIChatProvider \
-  --provider-kwargs '{"model":"/path/to/Qwen2.5-32B-Instruct","api_base":"http://127.0.0.1:8000/v1","api_key":"dummy","max_tokens":600,"temperature":1.0,"concurrency":256,"max_retries":3,"timeout":600}' \
-  --chunk-size 512 \
-  --storage-cls nla.datagen.storage.LocalStorage
+python -m compileall nla nla_inference.py
 ```
 
-Tune `concurrency` from benchmark results. Do not start with 500k calls; benchmark 512 or 2048 prompts first.
+## Training Commands
 
-## Build Final Training Parquets
-
-After Stage 2 succeeds for both AV and AR, run Stage 3 and shuffle:
+Set shared paths:
 
 ```bash
-python -m nla.datagen.run_pipeline \
-  --config configs/datagen/qwen7b_ultrafineweb_filtered_10k_deepseek_flash.yaml \
-  --stages 3,shuffle
+export DATA_DIR=/home/image3a/306920/dataset/nla_qwen7b_ultrafineweb_filtered_10k
+export INSTRUCT_MODEL=/home/image3a/306920/model/Qwen2.5-7B-Instruct
+export AV_SFT_PARQUET=$DATA_DIR/av_sft_shuf.parquet
+export AR_SFT_PARQUET=$DATA_DIR/ar_sft_shuf.parquet
+export RL_PARQUET=$DATA_DIR/rl_shuf.parquet
 ```
 
-If using local 32B manually for Stage 2, this same command is still fine because Stage 3 consumes only the explained parquet files.
-
-Final files to return to the training server:
-
-```text
-/tmp/nla_qwen7b_ultrafineweb_filtered_10k/av_sft_shuf.parquet
-/tmp/nla_qwen7b_ultrafineweb_filtered_10k/av_sft_shuf.parquet.nla_meta.yaml
-/tmp/nla_qwen7b_ultrafineweb_filtered_10k/ar_sft_shuf.parquet
-/tmp/nla_qwen7b_ultrafineweb_filtered_10k/ar_sft_shuf.parquet.nla_meta.yaml
-/tmp/nla_qwen7b_ultrafineweb_filtered_10k/rl_shuf.parquet
-/tmp/nla_qwen7b_ultrafineweb_filtered_10k/rl_shuf.parquet.nla_meta.yaml
-```
-
-Stage 3 needs the Qwen2.5-7B tokenizer path recorded in sidecars. Ensure `/home/image3a/306920/model/Qwen2.5-7B-Instruct` exists on the L20 server, or create a symlink to the local copy.
-
-## Monitoring
-
-Stage 2 progress:
+Prepare the truncated critic init checkpoint. `--num-layers 20` matches the
+activation extraction layer in the dataset.
 
 ```bash
-watch -n 30 'find /tmp/nla_qwen7b_ultrafineweb_filtered_10k/splits -path "*.parquet.chunks/chunk_*.parquet" | wc -l'
+export CRITIC_INIT_CKPT=/path/to/outputs/critic_init_qwen7b_layer20
+
+python -m nla.scripts.prepare_critic_checkpoint \
+  --base-model "$INSTRUCT_MODEL" \
+  --num-layers 20 \
+  --dataset-sidecar "$AR_SFT_PARQUET" \
+  --output "$CRITIC_INIT_CKPT" \
+  --megatron-compat
 ```
 
-For DeepSeek flash with `chunk_size=512`, expected total chunks:
-
-```text
-av_sft: 49
-ar_sft: 49
-total: 98
-```
-
-If any rows are dropped, inspect:
+Run Critic SFT:
 
 ```bash
-wc -l /tmp/nla_qwen7b_ultrafineweb_filtered_10k/splits/*bad_responses.jsonl
-head -1 /tmp/nla_qwen7b_ultrafineweb_filtered_10k/splits/*bad_responses.jsonl
+export SAVE_DIR=/path/to/outputs/critic_sft_10k
+bash configs/critic_sft.sh
 ```
 
-## Quality Notes
+Run Actor SFT:
 
-MiMo followed formatting more naturally but is limited to about `100 RPM`, making it too slow for 100k. DeepSeek flash is much faster but often writes features as `First/Second/Third` in one paragraph. The Stage 2 cleaner now handles that and logs any remaining bad responses.
+```bash
+export SAVE_DIR=/path/to/outputs/actor_sft_10k
+export INJ_SCALE=sqrt_d_model
+bash configs/actor_sft.sh
+```
 
-Do not change data-gen invariants: raw activation vectors only (`norm="none"`), document-level split by `doc_id`, Stage-0 `_MIN_POSITION = 50`, and preserve sidecars.
+Run RL after choosing the actor and critic checkpoints from the SFT outputs:
+
+```bash
+export ACTOR_SFT_CKPT=/path/to/outputs/actor_sft_10k/iter_XXXXXXX
+export CRITIC_SL_CKPT=/path/to/outputs/critic_sft_10k/iter_XXXXXXX/hf
+export RUN_DIR=/path/to/outputs/rl_10k
+bash configs/rl.sh
+```
+
+If `INJ_SCALE=sqrt_d_model` is not accepted by the current training code, use
+`INJ_SCALE=59.866` because `sqrt(3584) ~= 59.866`.
+
+## Invariants
+
+Keep these unchanged while debugging:
+
+- Data vectors are raw activations; normalization is represented by sidecar
+  metadata and training-time scaling.
+- Stage 1 was split at document level by `doc_id`.
+- `d_model=3584`, `layer=20`, and `cp_size` must stay compatible with Qwen2.5-7B.
+- RL must keep SGLang radix cache disabled because NLA injects different raw
+  activations behind the same marker token.
+- Do not regenerate data or filter rows on the training server.
+
+## Report Back
+
+After the run, report:
+
+- Row-count sanity check output.
+- Critic SFT first-loss and latest-loss lines.
+- Actor SFT first-loss and latest-loss lines.
+- RL startup result, first completed steps, and checkpoint paths.
+- Any tokenizer or `nla_meta.yaml` assertion exactly as printed.
